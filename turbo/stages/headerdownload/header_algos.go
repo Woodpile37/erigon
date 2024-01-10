@@ -121,6 +121,11 @@ func (hd *HeaderDownload) ReportBadHeader(headerHash libcommon.Hash) {
 	hd.lock.Lock()
 	defer hd.lock.Unlock()
 	hd.badHeaders[headerHash] = struct{}{}
+}
+
+func (hd *HeaderDownload) UnlinkHeader(headerHash libcommon.Hash) {
+	hd.lock.Lock()
+	defer hd.lock.Unlock()
 	// Find the link, remove it and all its descendands from all the queues
 	if link, ok := hd.links[headerHash]; ok {
 		hd.removeUpwards(link)
@@ -521,7 +526,7 @@ func (hd *HeaderDownload) InsertHeader(hf FeedHeaderFunc, terminalTotalDifficult
 	var returnTd *big.Int
 	var lastD *big.Int
 	var lastTime uint64
-	if hd.insertQueue.Len() > 0 && hd.insertQueue[0].blockHeight <= hd.highestInDb+1 {
+	if hd.insertQueue.Len() > 0 {
 		link := hd.insertQueue[0]
 		_, bad := hd.badHeaders[link.hash]
 		if !bad && !link.persisted {
@@ -574,7 +579,7 @@ func (hd *HeaderDownload) InsertHeader(hf FeedHeaderFunc, terminalTotalDifficult
 			if terminalTotalDifficulty != nil {
 				if td.Cmp(terminalTotalDifficulty) >= 0 {
 					hd.highestInDb = link.blockHeight
-					hd.logger.Info(POSPandaBanner)
+					//hd.logger.Info(POSPandaBanner)
 					dataflow.HeaderDownloadStates.AddChange(link.blockHeight, dataflow.HeaderInserted)
 					return true, true, 0, lastTime, nil
 				}
@@ -761,6 +766,15 @@ func (hd *HeaderDownload) HasLink(linkHash libcommon.Hash) bool {
 		return true
 	}
 	return false
+}
+
+func (hd *HeaderDownload) SourcePeerId(linkHash libcommon.Hash) [64]byte {
+	hd.lock.RLock()
+	defer hd.lock.RUnlock()
+	if link, ok := hd.getLink(linkHash); ok {
+		return link.peerId
+	}
+	return [64]byte{}
 }
 
 // SaveExternalAnnounce - does mark hash as seen in external announcement

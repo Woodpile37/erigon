@@ -2,17 +2,24 @@ package caplin1
 
 import (
 	"context"
+	"database/sql"
+	"os"
+	"path"
 	"time"
 
+	"github.com/ledgerwatch/erigon/cl/beacon"
+	"github.com/ledgerwatch/erigon/cl/beacon/handler"
 	"github.com/ledgerwatch/erigon/cl/cltypes/solid"
 	"github.com/ledgerwatch/erigon/cl/freezer"
 	"github.com/ledgerwatch/erigon/cl/persistence"
+	"github.com/ledgerwatch/erigon/cl/persistence/db_config"
+	"github.com/ledgerwatch/erigon/cl/persistence/sql_migrations"
 	"github.com/ledgerwatch/erigon/cl/phase1/core/state"
 	"github.com/ledgerwatch/erigon/cl/phase1/execution_client"
 	"github.com/ledgerwatch/erigon/cl/phase1/forkchoice"
 	"github.com/ledgerwatch/erigon/cl/phase1/network"
 	"github.com/ledgerwatch/erigon/cl/phase1/stages"
-	"github.com/spf13/afero"
+	"github.com/ledgerwatch/erigon/cl/pool"
 
 	"github.com/Giulio2002/bls"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces/sentinel"
@@ -21,9 +28,50 @@ import (
 	"github.com/ledgerwatch/log/v3"
 )
 
-func RunCaplinPhase1(ctx context.Context, sentinel sentinel.SentinelClient, beaconConfig *clparams.BeaconChainConfig, genesisConfig *clparams.GenesisConfig,
-	engine execution_client.ExecutionEngine, state *state.CachingBeaconState,
-	caplinFreezer freezer.Freezer, datadir string) error {
+func OpenCaplinDatabase(ctx context.Context,
+	databaseConfig db_config.DatabaseConfiguration,
+	beaconConfig *clparams.BeaconChainConfig,
+	rawBeaconChain persistence.RawBeaconBlockChain,
+	dbPath string,
+	engine execution_client.ExecutionEngine,
+) (persistence.BeaconChainDatabase, *sql.DB, error) {
+	dataDirIndexer := path.Join(dbPath, "beacon_indicies")
+	os.Remove(dataDirIndexer)
+	os.MkdirAll(dbPath, 0700)
+
+	db, err := sql.Open("sqlite", dataDirIndexer)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+
+	if err := sql_migrations.ApplyMigrations(ctx, tx); err != nil {
+		return nil, nil, err
+	}
+	if err := db_config.WriteConfigurationIfNotExist(ctx, tx, databaseConfig); err != nil {
+		return nil, nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	{ // start ticking forkChoice
+		go func() {
+			<-ctx.Done()
+			db.Close() // close sql database here
+		}()
+	}
+	return persistence.NewBeaconChainDatabaseFilesystem(rawBeaconChain, engine, beaconConfig), db, nil
+}
+
+func RunCaplinPhase1(ctx context.Context, sentinel sentinel.SentinelClient, engine execution_client.ExecutionEngine,
+	beaconConfig *clparams.BeaconChainConfig, genesisConfig *clparams.GenesisConfig, state *state.CachingBeaconState,
+	caplinFreezer freezer.Freezer, db *sql.DB, rawDB persistence.RawBeaconBlockChain, beaconDB persistence.BeaconChainDatabase, tmpdir string, cfg beacon.RouterConfiguration) error {
 	ctx, cn := context.WithCancel(ctx)
 	defer cn()
 
@@ -36,7 +84,9 @@ func RunCaplinPhase1(ctx context.Context, sentinel sentinel.SentinelClient, beac
 			return err
 		}
 	}
-	forkChoice, err := forkchoice.NewForkChoiceStore(state, engine, caplinFreezer, true)
+	pool := pool.NewOperationsPool(beaconConfig)
+
+	forkChoice, err := forkchoice.NewForkChoiceStore(ctx, state, engine, caplinFreezer, pool, true)
 	if err != nil {
 		logger.Error("Could not create forkchoice", "err", err)
 		return err
@@ -50,7 +100,27 @@ func RunCaplinPhase1(ctx context.Context, sentinel sentinel.SentinelClient, beac
 		return true
 	})
 	gossipManager := network.NewGossipReceiver(sentinel, forkChoice, beaconConfig, genesisConfig, caplinFreezer)
-	dataDirFs := afero.NewBasePathFs(afero.NewOsFs(), datadir)
+
+	{ // start ticking forkChoice
+		go func() {
+			tickInterval := time.NewTicker(2 * time.Millisecond)
+			for {
+				select {
+				case <-tickInterval.C:
+					forkChoice.OnTick(uint64(time.Now().Unix()))
+				case <-ctx.Done():
+					return
+				}
+
+			}
+		}()
+	}
+
+	if cfg.Active {
+		apiHandler := handler.NewApiHandler(genesisConfig, beaconConfig, rawDB, db, forkChoice, pool)
+		go beacon.ListenAndServe(apiHandler, &cfg)
+		log.Info("Beacon API started", "addr", cfg.Address)
+	}
 
 	{ // start the gossip manager
 		go gossipManager.Start(ctx)
@@ -73,26 +143,24 @@ func RunCaplinPhase1(ctx context.Context, sentinel sentinel.SentinelClient, beac
 		}()
 	}
 
-	{ // start ticking forkChoice
-		go func() {
-			tickInterval := time.NewTicker(50 * time.Millisecond)
-			for {
-				select {
-				case <-tickInterval.C:
-					forkChoice.OnTick(uint64(time.Now().Unix()))
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
 	}
-	beaconDB := persistence.NewbeaconChainDatabaseFilesystem(afero.NewBasePathFs(dataDirFs, datadir), beaconConfig)
-	stageCfg := stages.ClStagesCfg(beaconRpc, genesisConfig, beaconConfig, state, nil, gossipManager, forkChoice, beaconDB)
+	defer tx.Rollback()
+
+	dbConfig, err := db_config.ReadConfiguration(ctx, tx)
+	if err != nil {
+		return err
+	}
+	tx.Rollback()
+
+	stageCfg := stages.ClStagesCfg(beaconRpc, genesisConfig, beaconConfig, state, engine, gossipManager, forkChoice, beaconDB, db, tmpdir, dbConfig)
 	sync := stages.ConsensusClStages(ctx, stageCfg)
 
-	logger.Info("[caplin] starting clstages loop")
+	logger.Info("[Caplin] starting clstages loop")
 	err = sync.StartWithStage(ctx, "WaitForPeers", logger, stageCfg)
-	logger.Info("[caplin] exiting clstages loop")
+	logger.Info("[Caplin] exiting clstages loop")
 	if err != nil {
 		return err
 	}

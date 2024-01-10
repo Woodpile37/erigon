@@ -48,6 +48,8 @@ type HeadersCfg struct {
 	blockWriter   *blockio.BlockWriter
 	forkValidator *engine_helpers.ForkValidator
 	notifications *shards.Notifications
+
+	loopBreakCheck func() bool
 }
 
 func StageHeadersCfg(
@@ -64,7 +66,8 @@ func StageHeadersCfg(
 	blockWriter *blockio.BlockWriter,
 	tmpdir string,
 	notifications *shards.Notifications,
-	forkValidator *engine_helpers.ForkValidator) HeadersCfg {
+	forkValidator *engine_helpers.ForkValidator,
+	loopBreakCheck func() bool) HeadersCfg {
 	return HeadersCfg{
 		db:                db,
 		hd:                headerDownload,
@@ -80,6 +83,7 @@ func StageHeadersCfg(
 		blockWriter:       blockWriter,
 		forkValidator:     forkValidator,
 		notifications:     notifications,
+		loopBreakCheck:    loopBreakCheck,
 	}
 }
 
@@ -90,7 +94,7 @@ func SpawnStageHeaders(
 	tx kv.RwTx,
 	cfg HeadersCfg,
 	initialCycle bool,
-	test bool, // Set to true in tests, allows the stage to fail rather than wait indefinitely
+	test bool, // Returns true to allow the stage to stop rather than wait indefinitely
 	logger log.Logger,
 ) error {
 	useExternalTx := tx != nil
@@ -120,7 +124,7 @@ func HeadersPOW(
 	tx kv.RwTx,
 	cfg HeadersCfg,
 	initialCycle bool,
-	test bool, // Set to true in tests, allows the stage to fail rather than wait indefinitely
+	test bool, // Returns true to allow the stage to stop rather than wait indefinitely
 	useExternalTx bool,
 	logger log.Logger,
 ) error {
@@ -240,13 +244,6 @@ Loop:
 			return err
 		}
 
-		if test {
-			announces := cfg.hd.GrabAnnounces()
-			if len(announces) > 0 {
-				cfg.announceNewHashes(ctx, announces)
-			}
-		}
-
 		if headerInserter.BestHeaderChanged() { // We do not break unless there best header changed
 			noProgressCounter = 0
 			wasProgress = true
@@ -255,9 +252,20 @@ Loop:
 				break
 			}
 		}
-		if test {
+
+		if cfg.loopBreakCheck != nil && cfg.loopBreakCheck() {
 			break
 		}
+
+		if test {
+			announces := cfg.hd.GrabAnnounces()
+			if len(announces) > 0 {
+				cfg.announceNewHashes(ctx, announces)
+			}
+
+			break
+		}
+
 		timer := time.NewTimer(1 * time.Second)
 		select {
 		case <-ctx.Done():
@@ -290,7 +298,7 @@ Loop:
 		timer.Stop()
 	}
 	if headerInserter.Unwind() {
-		u.UnwindTo(headerInserter.UnwindPoint(), libcommon.Hash{})
+		u.UnwindTo(headerInserter.UnwindPoint(), StagedUnwind)
 	}
 	if headerInserter.GetHighest() != 0 {
 		if !headerInserter.Unwind() {
@@ -366,9 +374,14 @@ func HeadersUnwind(u *UnwindState, s *StageState, tx kv.RwTx, cfg HeadersCfg, te
 		defer tx.Rollback()
 	}
 	// Delete canonical hashes that are being unwound
-	badBlock := u.BadBlock != (libcommon.Hash{})
-	if badBlock {
-		cfg.hd.ReportBadHeader(u.BadBlock)
+	unwindBlock := (u.Reason.Block != nil)
+	if unwindBlock {
+		if u.Reason.IsBadBlock() {
+			cfg.hd.ReportBadHeader(*u.Reason.Block)
+		}
+
+		cfg.hd.UnlinkHeader(*u.Reason.Block)
+
 		// Mark all descendants of bad block as bad too
 		headerCursor, cErr := tx.Cursor(kv.Headers)
 		if cErr != nil {
@@ -389,10 +402,10 @@ func HeadersUnwind(u *UnwindState, s *StageState, tx kv.RwTx, cfg HeadersCfg, te
 			return fmt.Errorf("iterate over headers to mark bad headers: %w", err)
 		}
 	}
-	if err := rawdb.TruncateCanonicalHash(tx, u.UnwindPoint+1, badBlock); err != nil {
+	if err := rawdb.TruncateCanonicalHash(tx, u.UnwindPoint+1, unwindBlock); err != nil {
 		return err
 	}
-	if badBlock {
+	if unwindBlock {
 		var maxTd big.Int
 		var maxHash libcommon.Hash
 		var maxNum uint64 = 0
@@ -481,12 +494,13 @@ func logProgressHeaders(logPrefix string, prev, now uint64, logger log.Logger) u
 
 type ChainReaderImpl struct {
 	config      *chain.Config
-	tx          kv.Getter
+	tx          kv.Tx
 	blockReader services.FullBlockReader
+	logger      log.Logger
 }
 
-func NewChainReaderImpl(config *chain.Config, tx kv.Getter, blockReader services.FullBlockReader) *ChainReaderImpl {
-	return &ChainReaderImpl{config, tx, blockReader}
+func NewChainReaderImpl(config *chain.Config, tx kv.Tx, blockReader services.FullBlockReader, logger log.Logger) *ChainReaderImpl {
+	return &ChainReaderImpl{config, tx, blockReader, logger}
 }
 
 func (cr ChainReaderImpl) Config() *chain.Config        { return cr.config }
@@ -520,30 +534,25 @@ func (cr ChainReaderImpl) GetHeaderByHash(hash libcommon.Hash) *types.Header {
 func (cr ChainReaderImpl) GetTd(hash libcommon.Hash, number uint64) *big.Int {
 	td, err := rawdb.ReadTd(cr.tx, hash, number)
 	if err != nil {
-		log.Error("ReadTd failed", "err", err)
+		cr.logger.Error("ReadTd failed", "err", err)
 		return nil
 	}
 	return td
 }
-
 func (cr ChainReaderImpl) FrozenBlocks() uint64 {
 	return cr.blockReader.FrozenBlocks()
 }
-
-func HeadersPrune(p *PruneState, tx kv.RwTx, cfg HeadersCfg, ctx context.Context) (err error) {
-	useExternalTx := tx != nil
-	if !useExternalTx {
-		tx, err = cfg.db.BeginRw(ctx)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
+func (cr ChainReaderImpl) GetBlock(hash libcommon.Hash, number uint64) *types.Block {
+	panic("")
+}
+func (cr ChainReaderImpl) HasBlock(hash libcommon.Hash, number uint64) bool {
+	panic("")
+}
+func (cr ChainReaderImpl) BorEventsByBlock(hash libcommon.Hash, number uint64) []rlp.RawValue {
+	events, err := cr.blockReader.EventsByBlock(context.Background(), cr.tx, hash, number)
+	if err != nil {
+		cr.logger.Error("BorEventsByBlock failed", "err", err)
+		return nil
 	}
-
-	if !useExternalTx {
-		if err = tx.Commit(); err != nil {
-			return err
-		}
-	}
-	return nil
+	return events
 }

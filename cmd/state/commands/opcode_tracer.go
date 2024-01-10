@@ -26,11 +26,9 @@ import (
 	"github.com/ledgerwatch/erigon/common/debug"
 	"github.com/ledgerwatch/erigon/consensus"
 	"github.com/ledgerwatch/erigon/consensus/ethash"
-	"github.com/ledgerwatch/erigon/consensus/misc"
 	"github.com/ledgerwatch/erigon/core"
 	"github.com/ledgerwatch/erigon/core/rawdb"
 	"github.com/ledgerwatch/erigon/core/state"
-	"github.com/ledgerwatch/erigon/core/systemcontracts"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/core/vm"
 	"github.com/ledgerwatch/erigon/eth/ethconfig"
@@ -116,7 +114,7 @@ type opcodeTracer struct {
 	saveBblocks bool
 	blockNumber uint64
 	depth       int
-	env         vm.VMInterface
+	env         *vm.EVM
 }
 
 func NewOpcodeTracer(blockNum uint64, saveOpcodes bool, saveBblocks bool) *opcodeTracer {
@@ -197,7 +195,7 @@ func (ot *opcodeTracer) captureStartOrEnter(from, to libcommon.Address, create b
 	ot.stack = append(ot.stack, &newTx)
 }
 
-func (ot *opcodeTracer) CaptureStart(env vm.VMInterface, from libcommon.Address, to libcommon.Address, precompile bool, create bool, input []byte, gas uint64, value *uint256.Int, code []byte) {
+func (ot *opcodeTracer) CaptureStart(env *vm.EVM, from libcommon.Address, to libcommon.Address, precompile bool, create bool, input []byte, gas uint64, value *uint256.Int, code []byte) {
 	ot.env = env
 	ot.depth = 0
 	ot.captureStartOrEnter(from, to, create, input)
@@ -431,7 +429,7 @@ func OpcodeTracer(genesis *types.Genesis, blockNum uint64, chaindata string, num
 		}
 		return nil
 	})
-	blockReader := freezeblocks.NewBlockReader(freezeblocks.NewRoSnapshots(ethconfig.BlocksFreezing{Enabled: false}, "", log.New()))
+	blockReader := freezeblocks.NewBlockReader(freezeblocks.NewRoSnapshots(ethconfig.BlocksFreezing{Enabled: false}, "", log.New()), nil /* BorSnapshots */)
 
 	chainConfig := genesis.Config
 	vmConfig := vm.Config{Tracer: ot, Debug: true}
@@ -715,10 +713,7 @@ func runBlock(engine consensus.Engine, ibs *state.IntraBlockState, txnWriter sta
 	usedGas := new(uint64)
 	usedBlobGas := new(uint64)
 	var receipts types.Receipts
-	if chainConfig.DAOForkBlock != nil && chainConfig.DAOForkBlock.Cmp(block.Number()) == 0 {
-		misc.ApplyDAOHardFork(ibs)
-	}
-	systemcontracts.UpgradeBuildInSystemContract(chainConfig, header.Number, ibs, logger)
+	core.InitializeBlockExecution(engine, nil, header, chainConfig, ibs, logger)
 	rules := chainConfig.Rules(block.NumberU64(), block.Time())
 	for i, tx := range block.Transactions() {
 		ibs.SetTxContext(tx.Hash(), block.Hash(), i)

@@ -27,7 +27,7 @@ const (
 	PersistedQueueID
 )
 
-// Link is a chain link that can be connect to other chain links
+// Link is a chain link that can be connected to other links in the chain
 // For a given link, parent link can be found by hd.links[link.header.ParentHash], and child links by link.next (there may be more than one child in case of forks)
 // Links encapsule block headers
 // Links can be either persistent or not. Persistent links encapsule headers that have already been saved to the database, but these links are still
@@ -44,6 +44,7 @@ type Link struct {
 	linked      bool    // Whether this link is connected (via chain of ParentHash to one of the persisted links)
 	idx         int     // Index in the heap
 	queueId     QueueID // which queue this link belongs to
+	peerId      [64]byte
 }
 
 // LinkQueue is the priority queue of links. It is instantiated once for persistent links, and once for non-persistent links
@@ -197,7 +198,7 @@ func (iq *InsertQueue) Pop() interface{} {
 	old := *iq
 	n := len(old)
 	x := old[n-1]
-	old[n-1] = nil
+	old[n-1] = nil // avoid memory leak
 	*iq = old[0 : n-1]
 	x.idx = -1
 	x.queueId = NoQueue

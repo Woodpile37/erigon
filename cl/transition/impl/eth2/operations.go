@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/ledgerwatch/erigon/cl/abstract"
+	"github.com/ledgerwatch/erigon/metrics"
 
 	"github.com/ledgerwatch/erigon/cl/transition/impl/eth2/statechange"
-	"github.com/ledgerwatch/erigon/metrics/methelp"
 	"golang.org/x/exp/slices"
 
 	"github.com/ledgerwatch/erigon-lib/common"
@@ -39,16 +39,8 @@ func (I *impl) ProcessProposerSlashing(s abstract.BeaconState, propSlashing *clt
 		return fmt.Errorf("non-matching proposer indices proposer slashing: %d != %d", h1.ProposerIndex, h2.ProposerIndex)
 	}
 
-	h1Root, err := h1.HashSSZ()
-	if err != nil {
-		return fmt.Errorf("unable to hash header1: %v", err)
-	}
-	h2Root, err := h2.HashSSZ()
-	if err != nil {
-		return fmt.Errorf("unable to hash header2: %v", err)
-	}
-	if h1Root == h2Root {
-		return fmt.Errorf("propose slashing headers are the same: %v == %v", h1Root, h2Root)
+	if *h1 == *h2 {
+		return fmt.Errorf("proposee slashing headers are the same")
 	}
 
 	proposer, err := s.ValidatorForValidatorIndex(int(h1.ProposerIndex))
@@ -198,7 +190,7 @@ func (I *impl) ProcessDeposit(s abstract.BeaconState, deposit *cltypes.Deposit) 
 // ProcessVoluntaryExit takes a voluntary exit and applies state transition.
 func (I *impl) ProcessVoluntaryExit(s abstract.BeaconState, signedVoluntaryExit *cltypes.SignedVoluntaryExit) error {
 	// Sanity checks so that we know it is good.
-	voluntaryExit := signedVoluntaryExit.VolunaryExit
+	voluntaryExit := signedVoluntaryExit.VoluntaryExit
 	currentEpoch := state.Epoch(s)
 	validator, err := s.ValidatorForValidatorIndex(int(voluntaryExit.ValidatorIndex))
 	if err != nil {
@@ -480,7 +472,7 @@ func (I *impl) VerifyKzgCommitmentsAgainstTransactions(transactions *solid.Trans
 
 func (I *impl) ProcessAttestations(s abstract.BeaconState, attestations *solid.ListSSZ[*solid.Attestation]) error {
 	attestingIndiciesSet := make([][]uint64, attestations.Len())
-	h := methelp.NewHistTimer("beacon_process_attestations")
+	h := metrics.NewHistTimer("beacon_process_attestations")
 	baseRewardPerIncrement := s.BaseRewardPerIncrement()
 
 	c := h.Tag("attestation_step", "process")
@@ -519,7 +511,7 @@ func processAttestationPostAltair(s abstract.BeaconState, attestation *solid.Att
 	stateSlot := s.Slot()
 	beaconConfig := s.BeaconConfig()
 
-	h := methelp.NewHistTimer("beacon_process_attestation_post_altair")
+	h := metrics.NewHistTimer("beacon_process_attestation_post_altair")
 
 	c := h.Tag("step", "get_participation_flag")
 	participationFlagsIndicies, err := s.GetAttestationParticipationFlagIndicies(attestation.AttestantionData(), stateSlot-data.Slot())

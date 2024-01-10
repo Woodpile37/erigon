@@ -123,7 +123,7 @@ func TestSetupGenesis(t *testing.T) {
 				if err != nil {
 					return nil, nil, err
 				}
-				if err = m.InsertChain(chain, nil); err != nil {
+				if err = m.InsertChain(chain); err != nil {
 					return nil, nil, err
 				}
 				// This should return a compatibility error.
@@ -144,7 +144,7 @@ func TestSetupGenesis(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			_, db, _ := temporal.NewTestDB(t, datadir.New(tmpdir), nil)
-			blockReader := freezeblocks.NewBlockReader(freezeblocks.NewRoSnapshots(ethconfig.BlocksFreezing{Enabled: false}, "", log.New()))
+			blockReader := freezeblocks.NewBlockReader(freezeblocks.NewRoSnapshots(ethconfig.BlocksFreezing{Enabled: false}, "", log.New()), freezeblocks.NewBorRoSnapshots(ethconfig.BlocksFreezing{Enabled: false}, "", log.New()))
 			config, genesis, err := test.fn(db)
 			// Check the return values.
 			if !reflect.DeepEqual(err, test.wantErr) {

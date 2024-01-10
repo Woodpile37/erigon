@@ -17,7 +17,9 @@ var DefaultFlags = []cli.Flag{
 	&utils.TxPoolNoLocalsFlag,
 	&utils.TxPoolPriceLimitFlag,
 	&utils.TxPoolPriceBumpFlag,
+	&utils.TxPoolBlobPriceBumpFlag,
 	&utils.TxPoolAccountSlotsFlag,
+	&utils.TxPoolBlobSlotsFlag,
 	&utils.TxPoolGlobalSlotsFlag,
 	&utils.TxPoolGlobalBaseFeeSlotsFlag,
 	&utils.TxPoolAccountQueueFlag,
@@ -72,6 +74,7 @@ var DefaultFlags = []cli.Flag{
 	&utils.RpcGasCapFlag,
 	&utils.RpcBatchLimit,
 	&utils.RpcReturnDataLimit,
+	&utils.AllowUnprotectedTxs,
 	&utils.RPCGlobalTxFeeCapFlag,
 	&utils.TxpoolApiAddrFlag,
 	&utils.TraceMaxtracesFlag,
@@ -87,6 +90,7 @@ var DefaultFlags = []cli.Flag{
 	&utils.SnapStopFlag,
 	&utils.DbPageSizeFlag,
 	&utils.DbSizeLimitFlag,
+	&utils.ForcePartialCommitFlag,
 	&utils.TorrentPortFlag,
 	&utils.TorrentMaxPeersFlag,
 	&utils.TorrentConnsPerFileFlag,
@@ -133,7 +137,6 @@ var DefaultFlags = []cli.Flag{
 	&utils.MinerSigningKeyFileFlag,
 	&utils.SentryAddrFlag,
 	&utils.SentryLogPeerInfoFlag,
-	&utils.SentryDropUselessPeers,
 	&utils.DownloaderAddrFlag,
 	&utils.DisableIPV4,
 	&utils.DisableIPV6,
@@ -141,10 +144,12 @@ var DefaultFlags = []cli.Flag{
 	&utils.DownloaderVerifyFlag,
 	&HealthCheckFlag,
 	&utils.HeimdallURLFlag,
+	&utils.WebSeedsFlag,
 	&utils.WithoutHeimdallFlag,
 	&utils.HeimdallgRPCAddressFlag,
 	&utils.BorBlockPeriodFlag,
 	&utils.BorBlockSizeFlag,
+	&utils.WithHeimdallMilestones,
 	&utils.EthStatsURLFlag,
 	&utils.OverrideCancunFlag,
 
@@ -157,6 +162,8 @@ var DefaultFlags = []cli.Flag{
 	&utils.SentinelPortFlag,
 
 	&utils.OtsSearchMaxCapFlag,
+
+	&utils.SilkwormPathFlag,
 
 	&utils.TrustedSetupFile,
 }

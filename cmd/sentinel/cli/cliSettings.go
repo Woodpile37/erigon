@@ -3,10 +3,12 @@ package cli
 import (
 	"errors"
 	"fmt"
+	common2 "github.com/ledgerwatch/erigon-lib/common"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/ledgerwatch/erigon-lib/common/datadir"
 	"github.com/ledgerwatch/erigon/cl/phase1/core/rawdb"
 	"github.com/ledgerwatch/erigon/cl/phase1/core/state"
 	"github.com/ledgerwatch/erigon/common"
@@ -54,6 +56,7 @@ type ConsensusClientCliCfg struct {
 	JwtSecret             []byte
 
 	InitalState *state.CachingBeaconState
+	Dirs        datadir.Dirs
 }
 
 func SetupConsensusClientCfg(ctx *cli.Context) (*ConsensusClientCliCfg, error) {
@@ -97,6 +100,7 @@ func SetupConsensusClientCfg(ctx *cli.Context) (*ConsensusClientCliCfg, error) {
 	cfg.RecordMode = ctx.Bool(flags.RecordModeFlag.Name)
 	cfg.RecordDir = ctx.String(flags.RecordModeDir.Name)
 	cfg.DataDir = ctx.String(utils.DataDirFlag.Name)
+	cfg.Dirs = datadir.New(cfg.DataDir)
 
 	cfg.RunEngineAPI = ctx.Bool(flags.RunEngineAPI.Name)
 	cfg.EngineAPIAddr = ctx.String(flags.EngineApiHostFlag.Name)
@@ -129,10 +133,10 @@ func SetupConsensusClientCfg(ctx *cli.Context) (*ConsensusClientCliCfg, error) {
 	cfg.BeaconDataCfg = rawdb.BeaconDataConfigurations[ctx.String(flags.BeaconDBModeFlag.Name)]
 	// Process bootnodes
 	if ctx.String(flags.BootnodesFlag.Name) != "" {
-		cfg.NetworkCfg.BootNodes = utils.SplitAndTrim(ctx.String(flags.BootnodesFlag.Name))
+		cfg.NetworkCfg.BootNodes = common2.CliString2Array(ctx.String(flags.BootnodesFlag.Name))
 	}
 	if ctx.String(flags.SentinelStaticPeersFlag.Name) != "" {
-		cfg.NetworkCfg.StaticPeers = utils.SplitAndTrim(ctx.String(flags.SentinelStaticPeersFlag.Name))
+		cfg.NetworkCfg.StaticPeers = common2.CliString2Array(ctx.String(flags.SentinelStaticPeersFlag.Name))
 		fmt.Println(cfg.NetworkCfg.StaticPeers)
 	}
 	cfg.TransitionChain = ctx.Bool(flags.TransitionChainFlag.Name)
