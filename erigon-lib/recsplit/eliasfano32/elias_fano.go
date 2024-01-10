@@ -149,9 +149,13 @@ func (ef *EliasFano) Build() {
 	}
 }
 
+func (ef *EliasFano) touchLower(i uint64) { _ = ef.lowerBits[i] }
+func (ef *EliasFano) touchUpper(i uint64) { _ = ef.upperBits[i] }
+
 func (ef *EliasFano) get(i uint64) (val uint64, window uint64, sel int, currWord uint64, lower uint64) {
 	lower = i * ef.l
 	idx64, shift := lower/64, lower%64
+	ef.touchLower(idx64)
 	lower = ef.lowerBits[idx64] >> shift
 	if shift > 0 {
 		lower |= ef.lowerBits[idx64+1] << (64 - shift)
@@ -164,6 +168,7 @@ func (ef *EliasFano) get(i uint64) (val uint64, window uint64, sel int, currWord
 	jump := ef.jump[jumpSuperQ] + (ef.jump[idx64]&mask)>>shift
 
 	currWord = jump / 64
+	ef.touchUpper(currWord)
 	window = ef.upperBits[currWord] & (uint64(0xffffffffffffffff) << (jump % 64))
 	d := int(i & qMask)
 

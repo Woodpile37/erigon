@@ -27,6 +27,8 @@ import (
 	"github.com/ledgerwatch/erigon-lib/kv/order"
 )
 
+var DebugTxNumsMin = map[uint64]uint64{}
+
 type txNums struct{}
 
 var TxNums txNums

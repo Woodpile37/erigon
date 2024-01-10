@@ -384,9 +384,9 @@ func FillDBFromSnapshots(logPrefix string, ctx context.Context, tx kv.RwTx, dirs
 			if historyV3 {
 				_ = tx.ClearBucket(kv.MaxTxNum)
 				type IterBody interface {
-					IterateFrozenBodies(f func(blockNum, baseTxNum, txAmount uint64) error) error
+					IterateFrozenBodiesForStorage(f func(blockNum, baseTxNum, txAmount uint64) error) error
 				}
-				if err := blockReader.(IterBody).IterateFrozenBodies(func(blockNum, baseTxNum, txAmount uint64) error {
+				if err := blockReader.(IterBody).IterateFrozenBodiesForStorage(func(blockNum, baseTxNum, txAmount uint64) error {
 					select {
 					case <-ctx.Done():
 						return ctx.Err()
