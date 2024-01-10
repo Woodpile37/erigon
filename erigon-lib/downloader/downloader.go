@@ -409,6 +409,7 @@ func (d *Downloader) ReCalcStats(interval time.Duration) {
 			noMetadata = append(noMetadata, t.Name())
 		}
 
+		d.logger.Warn("[dbg] information", "name", t.Name(), "completed", t.Complete.Bool())
 		stats.Completed = stats.Completed && t.Complete.Bool()
 	}
 
@@ -417,14 +418,14 @@ func (d *Downloader) ReCalcStats(interval time.Duration) {
 		if len(noMetadata) > 5 {
 			noMetadata = append(noMetadata[:5], "...")
 		}
-		d.logger.Log(d.verbosity, "[snapshots] no metadata yet", "files", amount, "list", strings.Join(noMetadata, ","))
+		d.logger.Warn("[snapshots] no metadata yet", "files", amount, "list", strings.Join(noMetadata, ","))
 	}
 	if len(zeroProgress) > 0 {
 		amount := len(zeroProgress)
 		if len(zeroProgress) > 5 {
 			zeroProgress = append(zeroProgress[:5], "...")
 		}
-		d.logger.Log(d.verbosity, "[snapshots] no progress yet", "files", amount, "list", strings.Join(zeroProgress, ","))
+		d.logger.Warn("[snapshots] no progress yet", "files", amount, "list", strings.Join(zeroProgress, ","))
 	}
 
 	stats.DownloadRate = (stats.BytesDownload - prevStats.BytesDownload) / uint64(interval.Seconds())

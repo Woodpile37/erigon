@@ -255,7 +255,7 @@ func (d *WebSeeds) downloadTorrentFilesFromProviders(ctx context.Context, rootDi
 			strings.HasSuffix(name, ".ef.torrent")
 		if !whiteListed {
 			_, fName := filepath.Split(name)
-			d.logger.Log(d.verbosity, "[snapshots] webseed has .torrent, but we skip it because this file-type not supported yet", "name", fName)
+			d.logger.Warn("[snapshots] webseed has .torrent, but we skip it because this file-type not supported yet", "name", fName)
 			continue
 		}
 		//Erigon3 doesn't provide history of commitment (.v, .ef files), but does provide .kv:
@@ -264,11 +264,12 @@ func (d *WebSeeds) downloadTorrentFilesFromProviders(ctx context.Context, rootDi
 		e3blackListed := strings.Contains(name, "commitment") && (strings.HasSuffix(name, ".v.torrent") || strings.HasSuffix(name, ".ef.torrent"))
 		if e3blackListed {
 			_, fName := filepath.Split(name)
-			d.logger.Log(d.verbosity, "[snapshots] webseed has .torrent, but we skip it because this file-type not supported yet", "name", fName)
+			d.logger.Warn("[snapshots] webseed has .torrent, but we skip it because this file-type not supported yet", "name", fName)
 			continue
 		}
 		name := name
 		tUrls := tUrls
+		d.logger.Warn("[snapshots] before call", "name", name, "tUrls", tUrls)
 		e.Go(func() error {
 			for _, url := range tUrls {
 				res, err := d.callTorrentHttpProvider(ctx, url, name)
@@ -299,6 +300,7 @@ func (d *WebSeeds) callTorrentHttpProvider(ctx context.Context, url *url.URL, fi
 	request = request.WithContext(ctx)
 	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
+		log.Warn("[dbg] call fail", "f", fileName, "host", url.Hostname(), "err", err)
 		return nil, fmt.Errorf("webseed.downloadTorrentFile: host=%s, url=%s, %w", url.Hostname(), url.EscapedPath(), err)
 	}
 	defer resp.Body.Close()
@@ -308,11 +310,14 @@ func (d *WebSeeds) callTorrentHttpProvider(ctx context.Context, url *url.URL, fi
 	}
 	res, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Warn("[dbg] call fail", "f", fileName, "host", url.Hostname(), "err", err)
 		return nil, fmt.Errorf("webseed.downloadTorrentFile: host=%s, url=%s, %w", url.Hostname(), url.EscapedPath(), err)
 	}
 	if err = validateTorrentBytes(fileName, res, d.torrentsWhitelist); err != nil {
+		log.Warn("[dbg] validation fail", "f", fileName, "host", url.Hostname())
 		return nil, fmt.Errorf("webseed.downloadTorrentFile: host=%s, url=%s, %w", url.Hostname(), url.EscapedPath(), err)
 	}
+	log.Warn("[dbg] validation pass", "f", fileName, "host", url.Hostname())
 	return res, nil
 }
 

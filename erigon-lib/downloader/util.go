@@ -310,7 +310,6 @@ func IsSnapNameAllowed(name string) bool {
 func addTorrentFile(ctx context.Context, ts *torrent.TorrentSpec, torrentClient *torrent.Client, webseeds *WebSeeds) (t *torrent.Torrent, ok bool, err error) {
 	ts.ChunkSize = downloadercfg.DefaultNetworkChunkSize
 	ts.DisallowDataDownload = true
-	ts.DisableInitialPieceCheck = true
 	//re-try on panic, with 0 ChunkSize (lib doesn't allow change this field for existing torrents)
 	defer func() {
 		rec := recover()
@@ -341,6 +340,7 @@ func _addTorrentFile(ctx context.Context, ts *torrent.TorrentSpec, torrentClient
 	var have bool
 	t, have = torrentClient.Torrent(ts.InfoHash)
 	if !have {
+		defer func(t time.Time) { fmt.Printf("util.go:345: %s, %s\n", time.Since(t), ts.DisplayName) }(time.Now())
 		t, _, err := torrentClient.AddTorrentSpec(ts)
 		if err != nil {
 			return nil, false, fmt.Errorf("addTorrentFile %s: %w", ts.DisplayName, err)
@@ -350,8 +350,10 @@ func _addTorrentFile(ctx context.Context, ts *torrent.TorrentSpec, torrentClient
 
 	select {
 	case <-t.GotInfo():
+		defer func(t time.Time) { fmt.Printf("util.go:355: %s, %s\n", time.Since(t), ts.DisplayName) }(time.Now())
 		t.AddWebSeeds(ts.Webseeds)
 	default:
+		defer func(t time.Time) { fmt.Printf("util.go:358: %s, %s\n", time.Since(t), ts.DisplayName) }(time.Now())
 		t, _, err = torrentClient.AddTorrentSpec(ts)
 		if err != nil {
 			return t, true, fmt.Errorf("addTorrentFile %s: %w", ts.DisplayName, err)

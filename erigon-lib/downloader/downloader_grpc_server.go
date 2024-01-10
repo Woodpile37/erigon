@@ -85,6 +85,7 @@ func (s *GrpcServer) Add(ctx context.Context, request *proto_downloader.AddReque
 		}
 	}
 
+	s.d.ReCalcStats(20 * time.Second)
 	return &emptypb.Empty{}, nil
 }
 
