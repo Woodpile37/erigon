@@ -1,6 +1,7 @@
 package bor
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -59,11 +60,14 @@ type UnauthorizedProposerError struct {
 
 func (e *UnauthorizedProposerError) Error() string {
 	return fmt.Sprintf(
-		"Proposer 0x%x is not a part of the producer set at block %d",
+		"proposer 0x%x is not a part of the producer set at block %d",
 		e.Proposer,
 		e.Number,
 	)
 }
+
+// ErrUnauthorizedSigner is returned if a header is signed by a non-authorized entity.
+var ErrUnauthorizedSigner = errors.New("unauthorized signer")
 
 // UnauthorizedSignerError is returned if a header is [being] signed by an unauthorized entity.
 type UnauthorizedSignerError struct {
@@ -73,10 +77,14 @@ type UnauthorizedSignerError struct {
 
 func (e *UnauthorizedSignerError) Error() string {
 	return fmt.Sprintf(
-		"Signer 0x%x is not a part of the producer set at block %d",
+		"signer 0x%x is not a part of the producer set at block %d",
 		e.Signer,
 		e.Number,
 	)
+}
+
+func (e *UnauthorizedSignerError) Is(err error) bool {
+	return err == ErrUnauthorizedSigner
 }
 
 // WrongDifficultyError is returned if the difficulty of a block doesn't match the
