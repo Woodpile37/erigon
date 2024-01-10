@@ -10,24 +10,24 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ledgerwatch/erigon-lib/gointerfaces"
-	"github.com/ledgerwatch/erigon-lib/kv"
-	libstate "github.com/ledgerwatch/erigon-lib/state"
+	"github.com/ledgerwatch/erigon-lib/common/hexutil"
+	"github.com/ledgerwatch/erigon/cl/clparams"
+
+	"github.com/ledgerwatch/log/v3"
 
 	"github.com/ledgerwatch/erigon-lib/chain"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon-lib/common/fixedgas"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
+	"github.com/ledgerwatch/erigon-lib/gointerfaces"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces/execution"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces/txpool"
+	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/kvcache"
-	"github.com/ledgerwatch/log/v3"
+	libstate "github.com/ledgerwatch/erigon-lib/state"
 
-	"github.com/ledgerwatch/erigon/cl/clparams"
 	"github.com/ledgerwatch/erigon/cmd/rpcdaemon/cli"
 	"github.com/ledgerwatch/erigon/cmd/rpcdaemon/cli/httpcfg"
 	"github.com/ledgerwatch/erigon/common"
-	"github.com/ledgerwatch/erigon/common/hexutil"
 	"github.com/ledgerwatch/erigon/common/math"
 	"github.com/ledgerwatch/erigon/consensus"
 	"github.com/ledgerwatch/erigon/consensus/merge"
@@ -81,7 +81,7 @@ func (e *EngineServer) Start(httpConfig httpcfg.HttpCfg, db kv.RoDB, blockReader
 	eth rpchelper.ApiBackend, txPool txpool.TxpoolClient, mining txpool.MiningClient) {
 	base := jsonrpc.NewBaseApi(filters, stateCache, blockReader, agg, httpConfig.WithDatadir, httpConfig.EvmCallTimeout, engineReader, httpConfig.Dirs)
 
-	ethImpl := jsonrpc.NewEthAPI(base, db, eth, txPool, mining, httpConfig.Gascap, httpConfig.ReturnDataLimit, httpConfig.AllowUnprotectedTxs, e.logger)
+	ethImpl := jsonrpc.NewEthAPI(base, db, eth, txPool, mining, httpConfig.Gascap, httpConfig.ReturnDataLimit, httpConfig.AllowUnprotectedTxs, httpConfig.MaxGetProofRewindBlockCount, e.logger)
 
 	// engineImpl := NewEngineAPI(base, db, engineBackend)
 	// e.startEngineMessageHandler()
@@ -122,7 +122,7 @@ func (s *EngineServer) validatePayloadBlobs(req *engine_types.ExecutionPayload,
 	for _, txn := range *transactions {
 		actualBlobHashes = append(actualBlobHashes, txn.GetBlobHashes()...)
 	}
-	if len(actualBlobHashes) > int(fixedgas.MaxBlobsPerBlock) || req.BlobGasUsed.Uint64() > fixedgas.MaxBlobGasPerBlock {
+	if len(actualBlobHashes) > int(s.config.GetMaxBlobsPerBlock()) || req.BlobGasUsed.Uint64() > s.config.GetMaxBlobGasPerBlock() {
 		s.logger.Warn("[NewPayload] blobs/blobGasUsed exceeds max per block",
 			"count", len(actualBlobHashes), "BlobGasUsed", req.BlobGasUsed.Uint64())
 		bad, latestValidHash := s.hd.IsBadHeaderPoS(req.ParentHash)
@@ -534,13 +534,15 @@ func (s *EngineServer) forkchoiceUpdated(ctx context.Context, forkchoiceState *e
 }
 
 func (s *EngineServer) getPayloadBodiesByHash(ctx context.Context, request []libcommon.Hash, _ clparams.StateVersion) ([]*engine_types.ExecutionPayloadBodyV1, error) {
-	bodies := s.chainRW.GetBodiesByHases(request)
-
-	resp := make([]*engine_types.ExecutionPayloadBodyV1, len(bodies))
-	for idx := range request {
-		resp[idx] = extractPayloadBodyFromBody(bodies[idx])
+	bodies, err := s.chainRW.GetBodiesByHashes(request)
+	if err != nil {
+		return nil, err
 	}
 
+	resp := make([]*engine_types.ExecutionPayloadBodyV1, len(bodies))
+	for idx, body := range bodies {
+		resp[idx] = extractPayloadBodyFromBody(body)
+	}
 	return resp, nil
 }
 
@@ -558,13 +560,15 @@ func extractPayloadBodyFromBody(body *types.RawBody) *engine_types.ExecutionPayl
 }
 
 func (s *EngineServer) getPayloadBodiesByRange(ctx context.Context, start, count uint64, _ clparams.StateVersion) ([]*engine_types.ExecutionPayloadBodyV1, error) {
-	bodies := s.chainRW.GetBodiesByRange(start, count)
-
-	resp := make([]*engine_types.ExecutionPayloadBodyV1, len(bodies))
-	for idx := range bodies {
-		resp[idx] = extractPayloadBodyFromBody(bodies[idx])
+	bodies, err := s.chainRW.GetBodiesByRange(start, count)
+	if err != nil {
+		return nil, err
 	}
 
+	resp := make([]*engine_types.ExecutionPayloadBodyV1, len(bodies))
+	for idx, body := range bodies {
+		resp[idx] = extractPayloadBodyFromBody(body)
+	}
 	return resp, nil
 }
 

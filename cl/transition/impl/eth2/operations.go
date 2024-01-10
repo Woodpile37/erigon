@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/ledgerwatch/erigon-lib/metrics"
 	"github.com/ledgerwatch/erigon/cl/abstract"
-	"github.com/ledgerwatch/erigon/metrics"
 
 	"github.com/ledgerwatch/erigon/cl/transition/impl/eth2/statechange"
 	"golang.org/x/exp/slices"
@@ -165,7 +165,7 @@ func (I *impl) ProcessDeposit(s abstract.BeaconState, deposit *cltypes.Deposit) 
 		if err != nil {
 			return err
 		}
-		signedRoot := utils.Keccak256(depositMessageRoot[:], domain)
+		signedRoot := utils.Sha256(depositMessageRoot[:], domain)
 		// Perform BLS verification and if successful noice.
 		valid, err := bls.Verify(deposit.Data.Signature[:], signedRoot[:], publicKey[:])
 		// Literally you can input it trash.
@@ -234,7 +234,7 @@ func (I *impl) ProcessVoluntaryExit(s abstract.BeaconState, signedVoluntaryExit 
 
 // ProcessWithdrawals processes withdrawals by decreasing the balance of each validator
 // and updating the next withdrawal index and validator index.
-func (I *impl) ProcessWithdrawals(s abstract.BeaconState, withdrawals *solid.ListSSZ[*types.Withdrawal]) error {
+func (I *impl) ProcessWithdrawals(s abstract.BeaconState, withdrawals *solid.ListSSZ[*cltypes.Withdrawal]) error {
 	// Get the list of withdrawals, the expected withdrawals (if performing full validation),
 	// and the beacon configuration.
 	beaconConfig := s.BeaconConfig()
@@ -246,8 +246,8 @@ func (I *impl) ProcessWithdrawals(s abstract.BeaconState, withdrawals *solid.Lis
 		if len(expectedWithdrawals) != withdrawals.Len() {
 			return fmt.Errorf("ProcessWithdrawals: expected %d withdrawals, but got %d", len(expectedWithdrawals), withdrawals.Len())
 		}
-		if err := solid.RangeErr[*types.Withdrawal](withdrawals, func(i int, w *types.Withdrawal, _ int) error {
-			if !expectedWithdrawals[i].Equal(w) {
+		if err := solid.RangeErr[*cltypes.Withdrawal](withdrawals, func(i int, w *cltypes.Withdrawal, _ int) error {
+			if *expectedWithdrawals[i] != *w {
 				return fmt.Errorf("ProcessWithdrawals: withdrawal %d does not match expected withdrawal", i)
 			}
 			return nil
@@ -256,7 +256,7 @@ func (I *impl) ProcessWithdrawals(s abstract.BeaconState, withdrawals *solid.Lis
 		}
 	}
 
-	if err := solid.RangeErr[*types.Withdrawal](withdrawals, func(_ int, w *types.Withdrawal, _ int) error {
+	if err := solid.RangeErr[*cltypes.Withdrawal](withdrawals, func(_ int, w *cltypes.Withdrawal, _ int) error {
 		if err := state.DecreaseBalance(s, w.Validator, w.Amount); err != nil {
 			return err
 		}
@@ -320,7 +320,7 @@ func (I *impl) ProcessSyncAggregate(s abstract.BeaconState, sync *cltypes.SyncAg
 		if err != nil {
 			return err
 		}
-		msg := utils.Keccak256(blockRoot[:], domain)
+		msg := utils.Sha256(blockRoot[:], domain)
 		isValid, err := bls.VerifyAggregate(sync.SyncCommiteeSignature[:], msg[:], votedKeys)
 		if err != nil {
 			return err
@@ -404,7 +404,7 @@ func (I *impl) ProcessBlsToExecutionChange(s abstract.BeaconState, signedChange 
 		}
 
 		// Check the validator's withdrawal credentials against the provided message.
-		hashedFrom := utils.Keccak256(change.From[:])
+		hashedFrom := utils.Sha256(change.From[:])
 		if !bytes.Equal(hashedFrom[1:], wc[1:]) {
 			return fmt.Errorf("invalid withdrawal credentials")
 		}
@@ -514,7 +514,7 @@ func processAttestationPostAltair(s abstract.BeaconState, attestation *solid.Att
 	h := metrics.NewHistTimer("beacon_process_attestation_post_altair")
 
 	c := h.Tag("step", "get_participation_flag")
-	participationFlagsIndicies, err := s.GetAttestationParticipationFlagIndicies(attestation.AttestantionData(), stateSlot-data.Slot())
+	participationFlagsIndicies, err := s.GetAttestationParticipationFlagIndicies(data, stateSlot-data.Slot())
 	if err != nil {
 		return nil, err
 	}
@@ -522,7 +522,7 @@ func processAttestationPostAltair(s abstract.BeaconState, attestation *solid.Att
 
 	c = h.Tag("step", "get_attesting_indices")
 
-	attestingIndicies, err := s.GetAttestingIndicies(attestation.AttestantionData(), attestation.AggregationBits(), true)
+	attestingIndicies, err := s.GetAttestingIndicies(data, attestation.AggregationBits(), true)
 	if err != nil {
 		return nil, err
 	}
@@ -810,7 +810,7 @@ func (I *impl) ProcessRandao(s abstract.BeaconState, randao [96]byte, proposerIn
 	}
 
 	randaoMixes := s.GetRandaoMixes(epoch)
-	randaoHash := utils.Keccak256(randao[:])
+	randaoHash := utils.Sha256(randao[:])
 	mix := [32]byte{}
 	for i := range mix {
 		mix[i] = randaoMixes[i] ^ randaoHash[i]
@@ -842,7 +842,7 @@ func (I *impl) ProcessSlots(s abstract.BeaconState, slot uint64) error {
 	beaconConfig := s.BeaconConfig()
 	sSlot := s.Slot()
 	if slot <= sSlot {
-		return fmt.Errorf("new slot: %d not greater than s slot: %d", slot, sSlot)
+		return fmt.Errorf("new slot: %d not greater than current slot: %d", slot, sSlot)
 	}
 	// Process each slot.
 	for i := sSlot; i < slot; i++ {

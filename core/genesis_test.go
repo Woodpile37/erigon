@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/holiman/uint256"
+	"github.com/ledgerwatch/erigon-lib/chain/networkname"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/datadir"
 	"github.com/ledgerwatch/erigon-lib/kv"
@@ -19,11 +20,11 @@ import (
 	"github.com/ledgerwatch/erigon/core/state"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/params"
-	"github.com/ledgerwatch/erigon/params/networkname"
 	"github.com/ledgerwatch/log/v3"
 )
 
 func TestGenesisBlockHashes(t *testing.T) {
+	t.Parallel()
 	logger := log.New()
 	_, db, _ := temporal.NewTestDB(t, datadir.New(t.TempDir()), nil)
 	check := func(network string) {
@@ -45,6 +46,7 @@ func TestGenesisBlockHashes(t *testing.T) {
 }
 
 func TestGenesisBlockRoots(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	var err error
 
@@ -73,6 +75,7 @@ func TestGenesisBlockRoots(t *testing.T) {
 }
 
 func TestCommitGenesisIdempotency(t *testing.T) {
+	t.Parallel()
 	logger := log.New()
 	_, db, _ := temporal.NewTestDB(t, datadir.New(t.TempDir()), nil)
 	tx, err := db.BeginRw(context.Background())
@@ -94,6 +97,7 @@ func TestCommitGenesisIdempotency(t *testing.T) {
 }
 
 func TestAllocConstructor(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -130,10 +134,10 @@ func TestAllocConstructor(t *testing.T) {
 
 	key0 := libcommon.HexToHash("0000000000000000000000000000000000000000000000000000000000000000")
 	storage0 := &uint256.Int{}
-	state.GetState(address, &key0, storage0)
+	state.GetState(address, key0, storage0)
 	assert.Equal(uint256.NewInt(0x2a), storage0)
 	key1 := libcommon.HexToHash("0000000000000000000000000000000000000000000000000000000000000001")
 	storage1 := &uint256.Int{}
-	state.GetState(address, &key1, storage1)
+	state.GetState(address, key1, storage1)
 	assert.Equal(uint256.NewInt(0x01c9), storage1)
 }

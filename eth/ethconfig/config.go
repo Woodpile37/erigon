@@ -28,18 +28,20 @@ import (
 
 	"github.com/c2h5oh/datasize"
 	"github.com/ledgerwatch/erigon-lib/chain"
+	"github.com/ledgerwatch/erigon-lib/chain/networkname"
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/datadir"
 	"github.com/ledgerwatch/erigon-lib/downloader/downloadercfg"
 	"github.com/ledgerwatch/erigon-lib/txpool/txpoolcfg"
 
+	"github.com/ledgerwatch/erigon/cl/beacon/beacon_router_configuration"
+	"github.com/ledgerwatch/erigon/cl/clparams"
 	"github.com/ledgerwatch/erigon/consensus/ethash/ethashcfg"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/eth/ethconfig/estimate"
 	"github.com/ledgerwatch/erigon/eth/gasprice/gaspricecfg"
 	"github.com/ledgerwatch/erigon/ethdb/prune"
 	"github.com/ledgerwatch/erigon/params"
-	"github.com/ledgerwatch/erigon/params/networkname"
 )
 
 // AggregationStep number of transactions in smallest static file
@@ -74,7 +76,7 @@ var Defaults = Config{
 		ExecWorkerCount:            estimate.ReconstituteState.WorkersHalf(), //only half of CPU, other half will spend for snapshots build/merge/prune
 		ReconWorkerCount:           estimate.ReconstituteState.Workers(),
 		BodyCacheLimit:             256 * 1024 * 1024,
-		BodyDownloadTimeoutSeconds: 30,
+		BodyDownloadTimeoutSeconds: 2,
 	},
 	Ethash: ethashcfg.Config{
 		CachesInMem:      2,
@@ -102,7 +104,8 @@ var Defaults = Config{
 		Produce:    true,
 	},
 
-	SilkwormEnabled: false,
+	// applies if SilkwormLibraryPath is set
+	SilkwormExecution: true,
 }
 
 func init() {
@@ -178,8 +181,6 @@ type Config struct {
 	// for nodes to connect to.
 	EthDiscoveryURLs []string
 
-	P2PEnabled bool
-
 	Prune     prune.Mode
 	BatchSize datasize.ByteSize // Batch size for execution stage
 
@@ -187,8 +188,10 @@ type Config struct {
 
 	BadBlockHash common.Hash // hash of the block marked as bad
 
-	Snapshot   BlocksFreezing
-	Downloader *downloadercfg.Cfg
+	Snapshot     BlocksFreezing
+	Downloader   *downloadercfg.Cfg
+	BeaconRouter beacon_router_configuration.RouterConfiguration
+	CaplinConfig clparams.CaplinConfig
 
 	Dirs datadir.Dirs
 
@@ -253,8 +256,12 @@ type Config struct {
 	ForcePartialCommit bool
 
 	// Embedded Silkworm support
-	SilkwormEnabled bool
-	SilkwormPath    string
+	SilkwormLibraryPath string
+	SilkwormExecution   bool
+	SilkwormRpcDaemon   bool
+	SilkwormSentry      bool
+
+	DisableTxPoolGossip bool
 }
 
 type Sync struct {

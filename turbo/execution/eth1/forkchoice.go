@@ -240,6 +240,7 @@ func (e *EthereumExecutionModule) updateForkChoice(ctx context.Context, blockHas
 		return
 	}
 
+	// Truncate tx nums
 	if e.historyV3 {
 		if err := rawdbv3.TxNums.Truncate(tx, currentParentNumber); err != nil {
 			sendForkchoiceErrorWithoutWaiting(outcomeCh, err)
@@ -250,19 +251,20 @@ func (e *EthereumExecutionModule) updateForkChoice(ctx context.Context, blockHas
 	for _, canonicalSegment := range newCanonicals {
 		chainReader := stagedsync.NewChainReaderImpl(e.config, tx, e.blockReader, e.logger)
 
-		b := rawdb.ReadBlock(tx, canonicalSegment.hash, canonicalSegment.number)
+		b, _, _ := rawdb.ReadBody(tx, canonicalSegment.hash, canonicalSegment.number)
+		h := rawdb.ReadHeader(tx, canonicalSegment.hash, canonicalSegment.number)
 
-		if b == nil {
+		if b == nil || h == nil {
 			sendForkchoiceErrorWithoutWaiting(outcomeCh, fmt.Errorf("unexpected chain cap: %d", canonicalSegment.number))
 			return
 		}
 
-		if err := e.engine.VerifyHeader(chainReader, b.Header(), true); err != nil {
+		if err := e.engine.VerifyHeader(chainReader, h, true); err != nil {
 			sendForkchoiceErrorWithoutWaiting(outcomeCh, err)
 			return
 		}
 
-		if err := e.engine.VerifyUncles(chainReader, b.Header(), b.Uncles()); err != nil {
+		if err := e.engine.VerifyUncles(chainReader, h, b.Uncles); err != nil {
 			sendForkchoiceErrorWithoutWaiting(outcomeCh, err)
 			return
 		}
@@ -280,6 +282,10 @@ func (e *EthereumExecutionModule) updateForkChoice(ctx context.Context, blockHas
 	}
 	// Set Progress for headers and bodies accordingly.
 	if err := stages.SaveStageProgress(tx, stages.Headers, fcuHeader.Number.Uint64()); err != nil {
+		sendForkchoiceErrorWithoutWaiting(outcomeCh, err)
+		return
+	}
+	if err := stages.SaveStageProgress(tx, stages.BlockHashes, fcuHeader.Number.Uint64()); err != nil {
 		sendForkchoiceErrorWithoutWaiting(outcomeCh, err)
 		return
 	}
@@ -315,8 +321,6 @@ func (e *EthereumExecutionModule) updateForkChoice(ctx context.Context, blockHas
 		status = execution.ExecutionStatus_BadBlock
 		if log {
 			e.logger.Warn("bad forkchoice", "head", headHash, "hash", blockHash)
-			h, _ := e.getHeader(ctx, tx, headHash, *headNumber)
-			fmt.Println(h.Hash())
 		}
 	} else {
 		valid, err := e.verifyForkchoiceHashes(ctx, tx, blockHash, finalizedHash, safeHash)

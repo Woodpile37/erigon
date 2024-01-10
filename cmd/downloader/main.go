@@ -11,10 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/c2h5oh/datasize"
-	mdbx2 "github.com/erigontech/mdbx-go/mdbx"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_recovery "github.com/grpc-ecosystem/go-grpc-middleware/recovery"
+	"github.com/ledgerwatch/erigon-lib/chain/snapcfg"
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/datadir"
 	"github.com/ledgerwatch/erigon-lib/common/dir"
@@ -42,7 +43,6 @@ import (
 	"github.com/ledgerwatch/erigon/params"
 	"github.com/ledgerwatch/erigon/turbo/debug"
 	"github.com/ledgerwatch/erigon/turbo/logging"
-	"github.com/ledgerwatch/erigon/turbo/snapshotsync/snapcfg"
 )
 
 func main() {
@@ -61,6 +61,7 @@ var (
 	filePath                       string
 	forceRebuild                   bool
 	forceVerify                    bool
+	forceVerifyFiles               []string
 	downloaderApiAddr              string
 	natSetting                     string
 	torrentVerbosity               int
@@ -73,6 +74,7 @@ var (
 	targetFile                     string
 	disableIPV6                    bool
 	disableIPV4                    bool
+	seedbox                        bool
 )
 
 func init() {
@@ -93,10 +95,16 @@ func init() {
 	rootCmd.Flags().StringVar(&staticPeersStr, utils.TorrentStaticPeersFlag.Name, utils.TorrentStaticPeersFlag.Value, utils.TorrentStaticPeersFlag.Usage)
 	rootCmd.Flags().BoolVar(&disableIPV6, "downloader.disable.ipv6", utils.DisableIPV6.Value, utils.DisableIPV6.Usage)
 	rootCmd.Flags().BoolVar(&disableIPV4, "downloader.disable.ipv4", utils.DisableIPV4.Value, utils.DisableIPV6.Usage)
-	rootCmd.PersistentFlags().BoolVar(&forceVerify, "verify", false, "Force verify data files if have .torrent files")
+	rootCmd.Flags().BoolVar(&seedbox, "seedbox", false, "seedbox determines to either download .torrent from webseed or not")
+	rootCmd.PersistentFlags().BoolVar(&forceVerify, "verify", false, "Verify files. All by default, or passed by --verify.files")
+	rootCmd.PersistentFlags().StringArrayVar(&forceVerifyFiles, "verify.files", nil, "Limit list of files to verify")
 
 	withDataDir(createTorrent)
 	withFile(createTorrent)
+	rootCmd.AddCommand(createTorrent)
+
+	rootCmd.AddCommand(torrentCat)
+	rootCmd.AddCommand(torrentMagnet)
 
 	withDataDir(printTorrentHashes)
 	printTorrentHashes.PersistentFlags().BoolVar(&forceRebuild, "rebuild", false, "Force re-create .torrent files")
@@ -104,9 +112,8 @@ func init() {
 	if err := printTorrentHashes.MarkFlagFilename("targetfile"); err != nil {
 		panic(err)
 	}
-
-	rootCmd.AddCommand(createTorrent)
 	rootCmd.AddCommand(printTorrentHashes)
+
 }
 
 func withDataDir(cmd *cobra.Command) {
@@ -131,8 +138,10 @@ var rootCmd = &cobra.Command{
 		debug.Exit()
 	},
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		logger = debug.SetupCobra(cmd, "downloader")
-		logger.Info("Build info", "git_branch", params.GitBranch, "git_tag", params.GitTag, "git_commit", params.GitCommit)
+		if cmd.Name() != "torrent_cat" {
+			logger = debug.SetupCobra(cmd, "downloader")
+			logger.Info("Build info", "git_branch", params.GitBranch, "git_tag", params.GitTag, "git_commit", params.GitCommit)
+		}
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		if err := Downloader(cmd.Context(), logger); err != nil {
@@ -149,7 +158,7 @@ func Downloader(ctx context.Context, logger log.Logger) error {
 	if err := datadir.ApplyMigrations(dirs); err != nil {
 		return err
 	}
-	if err := checkChainName(dirs, chain); err != nil {
+	if err := checkChainName(ctx, dirs, chain); err != nil {
 		return err
 	}
 	torrentLogLevel, _, err := downloadercfg2.Int2LogLevel(torrentVerbosity)
@@ -169,12 +178,17 @@ func Downloader(ctx context.Context, logger log.Logger) error {
 	staticPeers := common.CliString2Array(staticPeersStr)
 
 	version := "erigon: " + params.VersionWithCommit(params.GitCommit)
-	cfg, err := downloadercfg2.New(dirs, version, torrentLogLevel, downloadRate, uploadRate, torrentPort, torrentConnsPerFile, torrentDownloadSlots, staticPeers, webseeds)
+
+	webseedsList := common.CliString2Array(webseeds)
+	if known, ok := snapcfg.KnownWebseeds[chain]; ok {
+		webseedsList = append(webseedsList, known...)
+	}
+	cfg, err := downloadercfg2.New(dirs, version, torrentLogLevel, downloadRate, uploadRate, torrentPort, torrentConnsPerFile, torrentDownloadSlots, staticPeers, webseedsList, chain)
 	if err != nil {
 		return err
 	}
 
-	cfg.ClientConfig.PieceHashersPerTorrent = runtime.NumCPU() * 4
+	cfg.ClientConfig.PieceHashersPerTorrent = 32 * runtime.NumCPU()
 	cfg.ClientConfig.DisableIPv6 = disableIPV6
 	cfg.ClientConfig.DisableIPv4 = disableIPV4
 
@@ -184,7 +198,8 @@ func Downloader(ctx context.Context, logger log.Logger) error {
 	}
 	downloadernat.DoNat(natif, cfg.ClientConfig, logger)
 
-	d, err := downloader.New(ctx, cfg, logger, log.LvlInfo)
+	cfg.DownloadTorrentFilesFromWebseed = true // enable it only for standalone mode now. feature is not fully ready yet
+	d, err := downloader.New(ctx, cfg, dirs, logger, log.LvlInfo, seedbox)
 	if err != nil {
 		return err
 	}
@@ -192,9 +207,11 @@ func Downloader(ctx context.Context, logger log.Logger) error {
 	logger.Info("[snapshots] Start bittorrent server", "my_peer_id", fmt.Sprintf("%x", d.TorrentClient().PeerID()))
 
 	if forceVerify { // remove and create .torrent files (will re-read all snapshots)
-		if err = d.VerifyData(ctx); err != nil {
+		if err = d.VerifyData(ctx, forceVerifyFiles); err != nil {
 			return err
 		}
+		logger.Info("[snapshots] Verify done")
+		return nil
 	}
 
 	d.MainLoopInBackground(false)
@@ -240,6 +257,57 @@ var printTorrentHashes = &cobra.Command{
 		if err := doPrintTorrentHashes(cmd.Context(), logger); err != nil {
 			log.Error(err.Error())
 		}
+		return nil
+	},
+}
+
+var torrentVerify = &cobra.Command{
+	Use:     "torrent_verify",
+	Example: "go run ./cmd/downloader torrent_verify <path_to_torrent_file>",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("please pass .torrent file path by first argument")
+		}
+		fPath := args[0]
+		mi, err := metainfo.LoadFromFile(fPath)
+		if err != nil {
+			return fmt.Errorf("LoadFromFile: %w, file=%s", err, fPath)
+		}
+
+		fmt.Printf("%s\n", mi.HashInfoBytes())
+		return nil
+	},
+}
+var torrentCat = &cobra.Command{
+	Use:     "torrent_cat",
+	Example: "go run ./cmd/downloader torrent_cat <path_to_torrent_file>",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("please pass .torrent file path by first argument")
+		}
+		fPath := args[0]
+		mi, err := metainfo.LoadFromFile(fPath)
+		if err != nil {
+			return fmt.Errorf("LoadFromFile: %w, file=%s", err, fPath)
+		}
+
+		fmt.Printf("%s\n", mi.HashInfoBytes())
+		return nil
+	},
+}
+var torrentMagnet = &cobra.Command{
+	Use:     "torrent_magnet",
+	Example: "go run ./cmd/downloader torrent_magnet <path_to_torrent_file>",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("please pass .torrent file path by first argument")
+		}
+		fPath := args[0]
+		mi, err := metainfo.LoadFromFile(fPath)
+		if err != nil {
+			return fmt.Errorf("LoadFromFile: %w, file=%s", err, fPath)
+		}
+		fmt.Printf("%s\n", mi.Magnet(nil, nil).String())
 		return nil
 	},
 }
@@ -374,14 +442,17 @@ func addPreConfiguredHashes(ctx context.Context, d *downloader.Downloader) error
 	return nil
 }
 
-func checkChainName(dirs datadir.Dirs, chainName string) error {
+func checkChainName(ctx context.Context, dirs datadir.Dirs, chainName string) error {
 	if !dir.FileExist(filepath.Join(dirs.Chaindata, "mdbx.dat")) {
 		return nil
 	}
-	db := mdbx.NewMDBX(log.New()).
+	db, err := mdbx.NewMDBX(log.New()).
 		Path(dirs.Chaindata).Label(kv.ChainDB).
-		Flags(func(flags uint) uint { return flags | mdbx2.Accede }).
-		MustOpen()
+		Accede().
+		Open(ctx)
+	if err != nil {
+		return err
+	}
 	defer db.Close()
 	if err := db.View(context.Background(), func(tx kv.Tx) error {
 		cc := tool.ChainConfig(tx)

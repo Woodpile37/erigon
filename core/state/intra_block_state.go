@@ -260,7 +260,7 @@ func (sdb *IntraBlockState) GetCodeHash(addr libcommon.Address) libcommon.Hash {
 
 // GetState retrieves a value from the given account's storage trie.
 // DESCRIBED: docs/programmers_guide/guide.md#address---identifier-of-an-account
-func (sdb *IntraBlockState) GetState(addr libcommon.Address, key *libcommon.Hash, value *uint256.Int) {
+func (sdb *IntraBlockState) GetState(addr libcommon.Address, key libcommon.Hash, value *uint256.Int) {
 	stateObject := sdb.getStateObject(addr)
 	if stateObject != nil && !stateObject.deleted {
 		stateObject.GetState(key, value)
@@ -271,7 +271,7 @@ func (sdb *IntraBlockState) GetState(addr libcommon.Address, key *libcommon.Hash
 
 // GetCommittedState retrieves a value from the given account's committed storage trie.
 // DESCRIBED: docs/programmers_guide/guide.md#address---identifier-of-an-account
-func (sdb *IntraBlockState) GetCommittedState(addr libcommon.Address, key *libcommon.Hash, value *uint256.Int) {
+func (sdb *IntraBlockState) GetCommittedState(addr libcommon.Address, key libcommon.Hash, value *uint256.Int) {
 	stateObject := sdb.getStateObject(addr)
 	if stateObject != nil && !stateObject.deleted {
 		stateObject.GetCommittedState(key, value)
@@ -311,7 +311,7 @@ func (sdb *IntraBlockState) AddBalance(addr libcommon.Address, amount *uint256.I
 	}
 	if !needAccount {
 		sdb.journal.append(balanceIncrease{
-			account:  &addr,
+			account:  addr,
 			increase: *amount,
 		})
 		bi, ok := sdb.balanceInc[addr]
@@ -367,7 +367,7 @@ func (sdb *IntraBlockState) SetCode(addr libcommon.Address, code []byte) {
 }
 
 // DESCRIBED: docs/programmers_guide/guide.md#address---identifier-of-an-account
-func (sdb *IntraBlockState) SetState(addr libcommon.Address, key *libcommon.Hash, value uint256.Int) {
+func (sdb *IntraBlockState) SetState(addr libcommon.Address, key libcommon.Hash, value uint256.Int) {
 	stateObject := sdb.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject.SetState(key, value)
@@ -410,7 +410,7 @@ func (sdb *IntraBlockState) Selfdestruct(addr libcommon.Address) bool {
 		return false
 	}
 	sdb.journal.append(selfdestructChange{
-		account:     &addr,
+		account:     addr,
 		prev:        stateObject.selfdestructed,
 		prevbalance: *stateObject.Balance(),
 	})
@@ -442,7 +442,7 @@ func (sdb *IntraBlockState) SetTransientState(addr libcommon.Address, key libcom
 	}
 
 	sdb.journal.append(transientStorageChange{
-		account:  &addr,
+		account:  addr,
 		key:      key,
 		prevalue: prev,
 	})
@@ -525,7 +525,7 @@ func (sdb *IntraBlockState) createObject(addr libcommon.Address, previous *state
 	newobj = newObject(sdb, addr, account, original)
 	newobj.setNonce(0) // sets the object to dirty
 	if previous == nil {
-		sdb.journal.append(createObjectChange{account: &addr})
+		sdb.journal.append(createObjectChange{account: addr})
 	} else {
 		sdb.journal.append(resetObjectChange{account: &addr, prev: previous})
 	}
@@ -795,7 +795,7 @@ func (sdb *IntraBlockState) Prepare(rules *chain.Rules, sender, coinbase libcomm
 func (sdb *IntraBlockState) AddAddressToAccessList(addr libcommon.Address) (addrMod bool) {
 	addrMod = sdb.accessList.AddAddress(addr)
 	if addrMod {
-		sdb.journal.append(accessListAddAccountChange{&addr})
+		sdb.journal.append(accessListAddAccountChange{addr})
 	}
 	return addrMod
 }
@@ -808,12 +808,12 @@ func (sdb *IntraBlockState) AddSlotToAccessList(addr libcommon.Address, slot lib
 		// scope of 'address' without having the 'address' become already added
 		// to the access list (via call-variant, create, etc).
 		// Better safe than sorry, though
-		sdb.journal.append(accessListAddAccountChange{&addr})
+		sdb.journal.append(accessListAddAccountChange{addr})
 	}
 	if slotMod {
 		sdb.journal.append(accessListAddSlotChange{
-			address: &addr,
-			slot:    &slot,
+			address: addr,
+			slot:    slot,
 		})
 	}
 	return addrMod, slotMod

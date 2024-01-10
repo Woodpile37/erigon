@@ -184,7 +184,7 @@ func (l *StructLogger) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 				address = libcommon.Hash(stack.Data[stack.Len()-1].Bytes32())
 				value   uint256.Int
 			)
-			l.env.IntraBlockState().GetState(contract.Address(), &address, &value)
+			l.env.IntraBlockState().GetState(contract.Address(), address, &value)
 			l.storage[contract.Address()][address] = value.Bytes32()
 		}
 		// capture SSTORE opcodes and record the written entry in the local storage.
@@ -391,7 +391,7 @@ func (t *mdLogger) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, scope
 		// format stack
 		var a []string
 		for _, elem := range stack.Data {
-			a = append(a, fmt.Sprintf("%v", elem.String()))
+			a = append(a, elem.String())
 		}
 		b := fmt.Sprintf("[%v]", strings.Join(a, ","))
 		fmt.Fprintf(t.out, "%10v |", b)

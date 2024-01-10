@@ -4,16 +4,17 @@ import (
 	"fmt"
 
 	"github.com/huandu/xstrings"
+
 	"github.com/ledgerwatch/erigon-lib/kv"
+	"github.com/ledgerwatch/erigon-lib/metrics"
 	"github.com/ledgerwatch/erigon/eth/stagedsync/stages"
-	"github.com/ledgerwatch/erigon/metrics"
 )
 
-var syncMetrics = map[stages.SyncStage]metrics.Counter{}
+var syncMetrics = map[stages.SyncStage]metrics.Gauge{}
 
 func init() {
 	for _, v := range stages.AllStages {
-		syncMetrics[v] = metrics.GetOrCreateCounter(
+		syncMetrics[v] = metrics.GetOrCreateGauge(
 			fmt.Sprintf(
 				`sync{stage="%s"}`,
 				xstrings.ToSnakeCase(string(v)),
@@ -30,7 +31,7 @@ func UpdateMetrics(tx kv.Tx) error {
 		if err != nil {
 			return err
 		}
-		m.Set(progress)
+		m.SetUint64(progress)
 	}
 	return nil
 }

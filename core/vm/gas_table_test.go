@@ -23,12 +23,13 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/ledgerwatch/erigon-lib/common/hexutil"
+
 	"github.com/holiman/uint256"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/datadir"
 	"github.com/ledgerwatch/erigon-lib/kv/memdb"
 
-	"github.com/ledgerwatch/erigon/common/hexutil"
 	"github.com/ledgerwatch/erigon/core/state"
 	"github.com/ledgerwatch/erigon/core/state/temporal"
 	"github.com/ledgerwatch/erigon/core/vm/evmtypes"
@@ -37,6 +38,7 @@ import (
 )
 
 func TestMemoryGasCost(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		size     uint64
 		cost     uint64
@@ -92,13 +94,14 @@ func TestEIP2200(t *testing.T) {
 		i := i
 
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			t.Parallel()
 			address := libcommon.BytesToAddress([]byte("contract"))
 			_, tx := memdb.NewTestTx(t)
 
 			s := state.New(state.NewPlainStateReader(tx))
 			s.CreateAccount(address, true)
 			s.SetCode(address, hexutil.MustDecode(tt.input))
-			s.SetState(address, &libcommon.Hash{}, *uint256.NewInt(uint64(tt.original)))
+			s.SetState(address, libcommon.Hash{}, *uint256.NewInt(uint64(tt.original)))
 
 			_ = s.CommitBlock(params.AllProtocolChanges.Rules(0, 0), state.NewPlainStateWriter(tx, tx, 0))
 			vmctx := evmtypes.BlockContext{
@@ -137,6 +140,7 @@ var createGasTests = []struct {
 }
 
 func TestCreateGas(t *testing.T) {
+	t.Parallel()
 	_, db, _ := temporal.NewTestDB(t, datadir.New(t.TempDir()), nil)
 	for i, tt := range createGasTests {
 		address := libcommon.BytesToAddress([]byte("contract"))

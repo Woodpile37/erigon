@@ -31,7 +31,6 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 	common2 "github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon-lib/common/cmp"
 	"github.com/ledgerwatch/erigon-lib/common/datadir"
 	dir2 "github.com/ledgerwatch/erigon-lib/common/dir"
 	"github.com/ledgerwatch/erigon-lib/downloader/downloadercfg"
@@ -176,7 +175,7 @@ func BuildTorrentFilesIfNeed(ctx context.Context, dirs datadir.Dirs) error {
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(cmp.Max(1, runtime.GOMAXPROCS(-1)-1) * 4)
+	g.SetLimit(runtime.GOMAXPROCS(-1) * 4)
 	var i atomic.Int32
 
 	for _, file := range files {
@@ -293,40 +292,28 @@ func loadTorrent(torrentFilePath string) (*torrent.TorrentSpec, error) {
 	mi.AnnounceList = Trackers
 	return torrent.TorrentSpecFromMetaInfoErr(mi)
 }
-func saveTorrent(torrentFilePath string, res []byte) error {
-	if len(res) == 0 {
-		return fmt.Errorf("try to write 0 bytes to file: %s", torrentFilePath)
-	}
-	f, err := os.Create(torrentFilePath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err = f.Write(res); err != nil {
-		return err
-	}
-	if err = f.Sync(); err != nil {
-		return err
-	}
-	return nil
-}
 
 // addTorrentFile - adding .torrent file to torrentClient (and checking their hashes), if .torrent file
 // added first time - pieces verification process will start (disk IO heavy) - Progress
 // kept in `piece completion storage` (surviving reboot). Once it done - no disk IO needed again.
 // Don't need call torrent.VerifyData manually
-func addTorrentFile(ctx context.Context, ts *torrent.TorrentSpec, torrentClient *torrent.Client) error {
+func addTorrentFile(ctx context.Context, ts *torrent.TorrentSpec, torrentClient *torrent.Client, webseeds *WebSeeds) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
-	if _, ok := torrentClient.Torrent(ts.InfoHash); !ok { // can set ChunkSize only for new torrents
+	wsUrls, ok := webseeds.ByFileName(ts.DisplayName)
+	if ok {
+		ts.Webseeds = append(ts.Webseeds, wsUrls...)
+	}
+
+	_, ok = torrentClient.Torrent(ts.InfoHash)
+	if !ok { // can set ChunkSize only for new torrents
 		ts.ChunkSize = downloadercfg.DefaultNetworkChunkSize
 	} else {
 		ts.ChunkSize = 0
 	}
-
 	ts.DisallowDataDownload = true
 	_, _, err := torrentClient.AddTorrentSpec(ts)
 	if err != nil {
@@ -358,4 +345,22 @@ func readPeerID(db kv.RoDB) (peerID []byte, err error) {
 // Deprecated: use `filepath.IsLocal` after drop go1.19 support
 func IsLocal(path string) bool {
 	return isLocal(path)
+}
+
+func saveTorrent(torrentFilePath string, res []byte) error {
+	if len(res) == 0 {
+		return fmt.Errorf("try to write 0 bytes to file: %s", torrentFilePath)
+	}
+	f, err := os.Create(torrentFilePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err = f.Write(res); err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	return nil
 }

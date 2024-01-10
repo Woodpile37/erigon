@@ -10,6 +10,7 @@ import (
 	"github.com/ledgerwatch/erigon/cl/phase1/core/state/shuffling"
 
 	"github.com/Giulio2002/bls"
+	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon/cl/clparams"
 	"github.com/ledgerwatch/erigon/cl/cltypes"
 	"github.com/ledgerwatch/erigon/cl/utils"
@@ -184,7 +185,7 @@ func (b *CachingBeaconState) GetBeaconCommitee(slot, committeeIndex uint64) ([]u
 
 func (b *CachingBeaconState) ComputeNextSyncCommittee() (*solid.SyncCommittee, error) {
 	beaconConfig := b.BeaconConfig()
-	optimizedHashFunc := utils.OptimizedKeccak256NotThreadSafe()
+	optimizedHashFunc := utils.OptimizedSha256NotThreadSafe()
 	epoch := Epoch(b) + 1
 	//math.MaxUint8
 	activeValidatorIndicies := b.GetActiveValidatorsIndices(epoch)
@@ -195,7 +196,7 @@ func (b *CachingBeaconState) ComputeNextSyncCommittee() (*solid.SyncCommittee, e
 	mix := b.GetRandaoMix(int(mixPosition))
 	seed := shuffling.GetSeed(b.BeaconConfig(), mix, epoch, beaconConfig.DomainSyncCommittee)
 	i := uint64(0)
-	syncCommitteePubKeys := make([][48]byte, 0, cltypes.SyncCommitteeSize)
+	syncCommitteePubKeys := make([]libcommon.Bytes48, 0, cltypes.SyncCommitteeSize)
 	preInputs := shuffling.ComputeShuffledIndexPreInputs(b.BeaconConfig(), seed)
 	for len(syncCommitteePubKeys) < cltypes.SyncCommitteeSize {
 		shuffledIndex, err := shuffling.ComputeShuffledIndex(
@@ -214,7 +215,7 @@ func (b *CachingBeaconState) ComputeNextSyncCommittee() (*solid.SyncCommittee, e
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, i/32)
 		input := append(seed[:], buf...)
-		randomByte := uint64(utils.Keccak256(input)[i%32])
+		randomByte := uint64(utils.Sha256(input)[i%32])
 		// retrieve validator.
 		validator, err := b.ValidatorForValidatorIndex(int(candidateIndex))
 		if err != nil {
@@ -235,7 +236,7 @@ func (b *CachingBeaconState) ComputeNextSyncCommittee() (*solid.SyncCommittee, e
 	if err != nil {
 		return nil, err
 	}
-	var aggregate [48]byte
+	var aggregate libcommon.Bytes48
 	copy(aggregate[:], aggregatePublicKeyBytes)
 
 	return solid.NewSyncCommitteeFromParameters(syncCommitteePubKeys, aggregate), nil
