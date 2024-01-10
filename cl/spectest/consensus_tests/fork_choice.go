@@ -3,9 +3,10 @@ package consensus_tests
 import (
 	"context"
 	"fmt"
-	"github.com/ledgerwatch/erigon/spectest"
 	"io/fs"
 	"testing"
+
+	"github.com/ledgerwatch/erigon/spectest"
 
 	"github.com/ledgerwatch/erigon/cl/abstract"
 	"github.com/ledgerwatch/erigon/cl/clparams"

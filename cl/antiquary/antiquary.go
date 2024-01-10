@@ -2,6 +2,7 @@ package antiquary
 
 import (
 	"context"
+	"golang.org/x/sync/semaphore"
 	"sync/atomic"
 	"time"
 
@@ -12,45 +13,64 @@ import (
 	"github.com/ledgerwatch/erigon/cl/clparams"
 	"github.com/ledgerwatch/erigon/cl/persistence"
 	"github.com/ledgerwatch/erigon/cl/persistence/beacon_indicies"
+	state_accessors "github.com/ledgerwatch/erigon/cl/persistence/state"
+	"github.com/ledgerwatch/erigon/cl/phase1/core/state"
 	"github.com/ledgerwatch/erigon/cl/utils"
 	"github.com/ledgerwatch/erigon/turbo/snapshotsync/freezeblocks"
 	"github.com/ledgerwatch/log/v3"
+	"github.com/spf13/afero"
 )
 
 const safetyMargin = 10_000 // We retire snapshots 10k blocks after the finalized head
 
 // Antiquary is where the snapshots go, aka old history, it is what keep track of the oldest records.
 type Antiquary struct {
-	mainDB     kv.RwDB // this is the main DB
-	dirs       datadir.Dirs
-	downloader proto_downloader.DownloaderClient
-	logger     log.Logger
-	sn         *freezeblocks.CaplinSnapshots
-	ctx        context.Context
-	beaconDB   persistence.BlockSource
-	backfilled *atomic.Bool
-	cfg        *clparams.BeaconChainConfig
+	mainDB          kv.RwDB // this is the main DB
+	dirs            datadir.Dirs
+	downloader      proto_downloader.DownloaderClient
+	logger          log.Logger
+	sn              *freezeblocks.CaplinSnapshots
+	snReader        freezeblocks.BeaconSnapshotReader
+	snBuildSema     *semaphore.Weighted // semaphore for building only one type (blocks, caplin, v3) at a time
+	ctx             context.Context
+	beaconDB        persistence.BlockSource
+	backfilled      *atomic.Bool
+	cfg             *clparams.BeaconChainConfig
+	states, blocks  bool
+	fs              afero.Fs
+	validatorsTable *state_accessors.StaticValidatorTable
+	genesisState    *state.CachingBeaconState
+	// set to nil
+	currentState *state.CachingBeaconState
+	balances32   []byte
 }
 
-func NewAntiquary(ctx context.Context, cfg *clparams.BeaconChainConfig, dirs datadir.Dirs, downloader proto_downloader.DownloaderClient, mainDB kv.RwDB, sn *freezeblocks.CaplinSnapshots, reader freezeblocks.BeaconSnapshotReader, beaconDB persistence.BlockSource, logger log.Logger) *Antiquary {
+func NewAntiquary(ctx context.Context, genesisState *state.CachingBeaconState, validatorsTable *state_accessors.StaticValidatorTable, cfg *clparams.BeaconChainConfig, dirs datadir.Dirs, downloader proto_downloader.DownloaderClient, mainDB kv.RwDB, sn *freezeblocks.CaplinSnapshots, reader freezeblocks.BeaconSnapshotReader, beaconDB persistence.BlockSource, logger log.Logger, states, blocks bool, fs afero.Fs, snBuildSema *semaphore.Weighted) *Antiquary {
 	backfilled := &atomic.Bool{}
 	backfilled.Store(false)
 	return &Antiquary{
-		mainDB:     mainDB,
-		dirs:       dirs,
-		downloader: downloader,
-		logger:     logger,
-		sn:         sn,
-		beaconDB:   beaconDB,
-		ctx:        ctx,
-		backfilled: backfilled,
-		cfg:        cfg,
+		mainDB:          mainDB,
+		dirs:            dirs,
+		downloader:      downloader,
+		logger:          logger,
+		sn:              sn,
+		beaconDB:        beaconDB,
+		ctx:             ctx,
+		backfilled:      backfilled,
+		cfg:             cfg,
+		states:          states,
+		snReader:        reader,
+		snBuildSema:     snBuildSema,
+		fs:              fs,
+		validatorsTable: validatorsTable,
+		genesisState:    genesisState,
+		blocks:          blocks,
 	}
 }
 
 // Antiquate is the function that starts transactions seeding and shit, very cool but very shit too as a name.
 func (a *Antiquary) Loop() error {
-	if a.downloader == nil {
+	if a.downloader == nil || !a.blocks {
 		return nil // Just skip if we don't have a downloader
 	}
 	// Skip if we dont support backfilling for the current network
@@ -78,7 +98,6 @@ func (a *Antiquary) Loop() error {
 		return err
 	}
 	// Here we need to start mdbx transaction and lock the thread
-	log.Info("[Antiquary]: Stopping Caplin to process historical indicies")
 	tx, err := a.mainDB.BeginRw(a.ctx)
 	if err != nil {
 		return err
@@ -94,6 +113,8 @@ func (a *Antiquary) Loop() error {
 		return err
 	}
 	defer logInterval.Stop()
+	log.Info("[Antiquary]: Stopping Caplin to process historical indicies", "from", from, "to", a.sn.BlocksAvailable())
+
 	// Now write the snapshots as indicies
 	for i := from; i < a.sn.BlocksAvailable(); i++ {
 		// read the snapshot
@@ -141,6 +162,10 @@ func (a *Antiquary) Loop() error {
 		}
 	}
 
+	if a.states {
+		go a.loopStates(a.ctx)
+	}
+
 	// write the indicies
 	if err := beacon_indicies.WriteLastBeaconSnapshot(tx, frozenSlots); err != nil {
 		return err
@@ -183,11 +208,11 @@ func (a *Antiquary) Loop() error {
 				continue
 			}
 			to = utils.Min64(to, to-safetyMargin) // We don't want to retire snapshots that are too close to the finalized head
-			to = (to / snaptype.Erigon2RecentMergeLimit) * snaptype.Erigon2RecentMergeLimit
-			if to-from < snaptype.Erigon2RecentMergeLimit {
+			to = (to / snaptype.Erigon2MergeLimit) * snaptype.Erigon2MergeLimit
+			if to-from < snaptype.Erigon2MergeLimit {
 				continue
 			}
-			if err := a.antiquate(from, to); err != nil {
+			if err := a.antiquate(a.sn.Version(), from, to); err != nil {
 				return err
 			}
 		case <-a.ctx.Done():
@@ -195,13 +220,24 @@ func (a *Antiquary) Loop() error {
 	}
 }
 
+// weight for the semaphore to build only one type of snapshots at a time
+// for now all of them have the same weight
+const caplinSnapshotBuildSemaWeight int64 = 1
+
 // Antiquate will antiquate a specific block range (aka. retire snapshots), this should be ran in the background.
-func (a *Antiquary) antiquate(from, to uint64) error {
+func (a *Antiquary) antiquate(version uint8, from, to uint64) error {
 	if a.downloader == nil {
 		return nil // Just skip if we don't have a downloader
 	}
+	if a.snBuildSema != nil {
+		if !a.snBuildSema.TryAcquire(caplinSnapshotBuildSemaWeight) {
+			return nil
+		}
+		defer a.snBuildSema.TryAcquire(caplinSnapshotBuildSemaWeight)
+	}
+
 	log.Info("[Antiquary]: Antiquating", "from", from, "to", to)
-	if err := freezeblocks.DumpBeaconBlocks(a.ctx, a.mainDB, a.beaconDB, from, to, snaptype.Erigon2RecentMergeLimit, a.dirs.Tmp, a.dirs.Snap, 8, log.LvlDebug, a.logger); err != nil {
+	if err := freezeblocks.DumpBeaconBlocks(a.ctx, a.mainDB, a.beaconDB, version, from, to, snaptype.Erigon2MergeLimit, a.dirs.Tmp, a.dirs.Snap, 1, log.LvlDebug, a.logger); err != nil {
 		return err
 	}
 
@@ -219,15 +255,15 @@ func (a *Antiquary) antiquate(from, to uint64) error {
 	}
 
 	paths := a.sn.SegFilePaths(from, to)
-	downloadItems := make([]*proto_downloader.DownloadItem, len(paths))
+	downloadItems := make([]*proto_downloader.AddItem, len(paths))
 	for i, path := range paths {
-		downloadItems[i] = &proto_downloader.DownloadItem{
+		downloadItems[i] = &proto_downloader.AddItem{
 			Path: path,
 		}
 	}
 	// Notify bittorent to seed the new snapshots
-	if _, err := a.downloader.Download(a.ctx, &proto_downloader.DownloadRequest{Items: downloadItems}); err != nil {
-		return err
+	if _, err := a.downloader.Add(a.ctx, &proto_downloader.AddRequest{Items: downloadItems}); err != nil {
+		log.Warn("[Antiquary]: Failed to add items to bittorent", "err", err)
 	}
 
 	tx, err := a.mainDB.BeginRw(a.ctx)
@@ -235,6 +271,7 @@ func (a *Antiquary) antiquate(from, to uint64) error {
 		return err
 	}
 	defer tx.Rollback()
+	a.validatorsTable.SetSlot(to)
 	if err := beacon_indicies.WriteLastBeaconSnapshot(tx, to-1); err != nil {
 		return err
 	}

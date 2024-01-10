@@ -405,6 +405,12 @@ const (
 	TblTracesToKeys   = "TracesToKeys"
 	TblTracesToIdx    = "TracesToIdx"
 
+	// Prune progress of execution: tableName -> [8bytes of invStep]latest pruned key
+	// Could use table constants `Tbl{Account,Storage,Code,Commitment}Keys` for domains
+	// corresponding history tables `Tbl{Account,Storage,Code,Commitment}HistoryKeys` for history
+	// and `Tbl{Account,Storage,Code,Commitment}Idx` for inverted indices
+	TblPruningProgress = "PruningProgress"
+
 	Snapshots = "Snapshots" // name -> hash
 
 	//State Reconstitution
@@ -460,8 +466,40 @@ const (
 	// Period (one every 27 hours) => LightClientUpdate
 	LightClientUpdates = "LightClientUpdates"
 	// Beacon historical data
-	// ValidatorIndex => [Public Key]
-	ValidatorPublicKeys = "ValidatorPublickeys"
+	// ValidatorIndex => [Field]
+	ValidatorPublicKeys         = "ValidatorPublickeys"
+	InvertedValidatorPublicKeys = "InvertedValidatorPublickeys"
+	// ValidatorIndex + Slot => [Field]
+	ValidatorEffectiveBalance = "ValidatorEffectiveBalance"
+	ValidatorSlashings        = "ValidatorSlashings"
+	ValidatorBalance          = "ValidatorBalance"
+	StaticValidators          = "StaticValidators"
+	StateEvents               = "StateEvents"
+	ActiveValidatorIndicies   = "ActiveValidatorIndicies"
+
+	// External data
+	StateRoot = "StateRoot"
+	BlockRoot = "BlockRoot"
+	// Differentiate data stored per-slot vs per-epoch
+	SlotData  = "SlotData"
+	EpochData = "EpochData"
+	// State fields
+	InactivityScores           = "InactivityScores"
+	PreviousEpochParticipation = "PreviousEpochParticipation"
+	CurrentEpochParticipation  = "CurrentEpochParticipation"
+	NextSyncCommittee          = "NextSyncCommittee"
+	CurrentSyncCommittee       = "CurrentSyncCommittee"
+	HistoricalRoots            = "HistoricalRoots"
+	HistoricalSummaries        = "HistoricalSummaries"
+	CurrentEpochAttestations   = "EpochAttestations"
+	PreviousEpochAttestations  = "PreviousAttestations"
+	Eth1DataVotes              = "Eth1DataVotes"
+
+	IntraRandaoMixes = "IntraRandaoMixes" // [validator_index+slot] => [randao_mix]
+	RandaoMixes      = "RandaoMixes"      // [validator_index+slot] => [randao_mix]
+	Proposers        = "BlockProposers"   // epoch => proposers indicies
+
+	StatesProcessingProgress = "StatesProcessingProgress"
 )
 
 // Keys
@@ -494,6 +532,8 @@ var (
 	LightClientStore            = []byte("LightClientStore")
 	LightClientFinalityUpdate   = []byte("LightClientFinalityUpdate")
 	LightClientOptimisticUpdate = []byte("LightClientOptimisticUpdate")
+
+	StatesProcessingKey = []byte("StatesProcessing")
 )
 
 // ChaindataTables - list of all buckets. App will panic if some bucket is not in this list.
@@ -593,6 +633,8 @@ var ChaindataTables = []string{
 	TblTracesToKeys,
 	TblTracesToIdx,
 
+	TblPruningProgress,
+
 	Snapshots,
 	MaxTxNum,
 
@@ -621,7 +663,34 @@ var ChaindataTables = []string{
 	BlockRootToBlockHash,
 	BlockRootToBlockNumber,
 	LastBeaconSnapshot,
+	// State Reconstitution
 	ValidatorPublicKeys,
+	InvertedValidatorPublicKeys,
+	ValidatorEffectiveBalance,
+	ValidatorBalance,
+	ValidatorSlashings,
+	StaticValidators,
+	StateEvents,
+	// Other stuff (related to state reconstitution)
+	BlockRoot,
+	StateRoot,
+	SlotData,
+	EpochData,
+	RandaoMixes,
+	Proposers,
+	StatesProcessingProgress,
+	PreviousEpochParticipation,
+	CurrentEpochParticipation,
+	InactivityScores,
+	NextSyncCommittee,
+	CurrentSyncCommittee,
+	HistoricalRoots,
+	HistoricalSummaries,
+	CurrentEpochAttestations,
+	PreviousEpochAttestations,
+	Eth1DataVotes,
+	IntraRandaoMixes,
+	ActiveValidatorIndicies,
 }
 
 const (
@@ -719,6 +788,7 @@ var ChaindataTablesCfg = TableCfg{
 	TblCodeIdx:               {Flags: DupSort},
 	TblCommitmentKeys:        {Flags: DupSort},
 	TblCommitmentHistoryKeys: {Flags: DupSort},
+	TblCommitmentHistoryVals: {Flags: DupSort},
 	TblCommitmentIdx:         {Flags: DupSort},
 	TblLogAddressKeys:        {Flags: DupSort},
 	TblLogAddressIdx:         {Flags: DupSort},
@@ -728,6 +798,7 @@ var ChaindataTablesCfg = TableCfg{
 	TblTracesFromIdx:         {Flags: DupSort},
 	TblTracesToKeys:          {Flags: DupSort},
 	TblTracesToIdx:           {Flags: DupSort},
+	TblPruningProgress:       {Flags: DupSort},
 	RAccountKeys:             {Flags: DupSort},
 	RAccountIdx:              {Flags: DupSort},
 	RStorageKeys:             {Flags: DupSort},
@@ -830,21 +901,24 @@ func reinit() {
 // Temporal
 
 const (
-	AccountsDomain Domain = "AccountsDomain"
-	StorageDomain  Domain = "StorageDomain"
-	CodeDomain     Domain = "CodeDomain"
+	AccountsDomain   Domain = "AccountsDomain"
+	StorageDomain    Domain = "StorageDomain"
+	CodeDomain       Domain = "CodeDomain"
+	CommitmentDomain Domain = "CommitmentDomain"
 )
 
 const (
-	AccountsHistory History = "AccountsHistory"
-	StorageHistory  History = "StorageHistory"
-	CodeHistory     History = "CodeHistory"
+	AccountsHistory   History = "AccountsHistory"
+	StorageHistory    History = "StorageHistory"
+	CodeHistory       History = "CodeHistory"
+	CommitmentHistory History = "CommitmentHistory"
 )
 
 const (
-	AccountsHistoryIdx InvertedIdx = "AccountsHistoryIdx"
-	StorageHistoryIdx  InvertedIdx = "StorageHistoryIdx"
-	CodeHistoryIdx     InvertedIdx = "CodeHistoryIdx"
+	AccountsHistoryIdx   InvertedIdx = "AccountsHistoryIdx"
+	StorageHistoryIdx    InvertedIdx = "StorageHistoryIdx"
+	CodeHistoryIdx       InvertedIdx = "CodeHistoryIdx"
+	CommitmentHistoryIdx InvertedIdx = "CommitmentHistoryIdx"
 
 	LogTopicIdx   InvertedIdx = "LogTopicIdx"
 	LogAddrIdx    InvertedIdx = "LogAddrIdx"

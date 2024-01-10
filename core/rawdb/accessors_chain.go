@@ -43,11 +43,6 @@ import (
 	"github.com/ledgerwatch/erigon/rlp"
 )
 
-const (
-	spanLength    = 6400 // Number of blocks in a span
-	zerothSpanEnd = 255  // End block of 0th span
-)
-
 // ReadCanonicalHash retrieves the hash assigned to a canonical block number.
 func ReadCanonicalHash(db kv.Getter, number uint64) (common.Hash, error) {
 	data, err := db.GetOne(kv.HeaderCanonical, hexutility.EncodeTs(number))
@@ -289,27 +284,17 @@ func ReadCurrentHeader(db kv.Getter) *types.Header {
 	return ReadHeader(db, headHash, *headNumber)
 }
 
-func ReadHeadersByNumber(db kv.Tx, number uint64) ([]*types.Header, error) {
-	var res []*types.Header
-	c, err := db.Cursor(kv.Headers)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
+func ReadHeadersByNumber(db kv.Getter, number uint64) (res []*types.Header, err error) {
 	prefix := hexutility.EncodeTs(number)
-	for k, v, err := c.Seek(prefix); k != nil; k, v, err = c.Next() {
-		if err != nil {
-			return nil, err
-		}
-		if !bytes.HasPrefix(k, prefix) {
-			break
-		}
-
+	if err = db.ForPrefix(kv.Headers, prefix, func(k, v []byte) error {
 		header := new(types.Header)
 		if err := rlp.Decode(bytes.NewReader(v), header); err != nil {
-			return nil, fmt.Errorf("invalid block header RLP: hash=%x, err=%w", k[8:], err)
+			return fmt.Errorf("invalid block header RLP: hash=%x, err=%w", k[8:], err)
 		}
 		res = append(res, header)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return res, nil
 }
@@ -695,7 +680,7 @@ func DeleteBody(db kv.Deleter, hash common.Hash, number uint64) {
 }
 
 func AppendCanonicalTxNums(tx kv.RwTx, from uint64) (err error) {
-	nextBaseTxNum := -1
+	nextBaseTxNum := 0
 	if from > 0 {
 		nextBaseTxNumFromDb, err := rawdbv3.TxNums.Max(tx, from-1)
 		if err != nil {
@@ -1074,7 +1059,7 @@ func PruneBlocks(tx kv.RwTx, blockTo uint64, blocksDeleteLimit int) error {
 // keeps genesis in db: [1, to)
 // doesn't change sequences of kv.EthTx and kv.NonCanonicalTxs
 // doesn't delete Receipts, Senders, Canonical markers, TotalDifficulty
-func PruneBorBlocks(tx kv.RwTx, blockTo uint64, blocksDeleteLimit int) error {
+func PruneBorBlocks(tx kv.RwTx, blockTo uint64, blocksDeleteLimit int, spanIDAt func(number uint64) uint64) error {
 	c, err := tx.Cursor(kv.BorEventNums)
 	if err != nil {
 		return err
@@ -1109,10 +1094,7 @@ func PruneBorBlocks(tx kv.RwTx, blockTo uint64, blocksDeleteLimit int) error {
 	if err != nil {
 		return err
 	}
-	var firstSpanToKeep uint64
-	if blockTo > zerothSpanEnd {
-		firstSpanToKeep = 1 + (blockTo-zerothSpanEnd-1)/spanLength
-	}
+	firstSpanToKeep := spanIDAt(blockTo)
 	c2, err := tx.RwCursor(kv.BorSpans)
 	if err != nil {
 		return err

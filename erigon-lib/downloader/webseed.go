@@ -40,6 +40,8 @@ type WebSeeds struct {
 
 	logger    log.Logger
 	verbosity log.Lvl
+
+	torrentFiles *TorrentFiles
 }
 
 func (d *WebSeeds) Discover(ctx context.Context, s3tokens []string, urls []*url.URL, files []string, rootDir string) {
@@ -63,6 +65,7 @@ func (d *WebSeeds) downloadWebseedTomlFromProviders(ctx context.Context, s3Provi
 		}
 		list = append(list, response)
 	}
+
 	for _, webSeedProviderURL := range s3Providers {
 		select {
 		case <-ctx.Done():
@@ -130,19 +133,34 @@ func (d *WebSeeds) ByFileName(name string) (metainfo.UrlList, bool) {
 	return v, ok
 }
 func (d *WebSeeds) callHttpProvider(ctx context.Context, webSeedProviderUrl *url.URL) (snaptype.WebSeedsFromProvider, error) {
-	request, err := http.NewRequest(http.MethodGet, webSeedProviderUrl.String(), nil)
+	baseUrl := webSeedProviderUrl.String()
+	ref, err := url.Parse("manifest.txt")
 	if err != nil {
 		return nil, err
 	}
+	u := webSeedProviderUrl.ResolveReference(ref)
+	request, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
 	request = request.WithContext(ctx)
 	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("webseed.http: host=%s, url=%s, %w", webSeedProviderUrl.Hostname(), webSeedProviderUrl.EscapedPath(), err)
+		return nil, fmt.Errorf("webseed.http: %w, host=%s, url=%s", err, webSeedProviderUrl.Hostname(), webSeedProviderUrl.EscapedPath())
 	}
 	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("webseed.http: %w, host=%s, url=%s, ", err, webSeedProviderUrl.Hostname(), webSeedProviderUrl.EscapedPath())
+	}
 	response := snaptype.WebSeedsFromProvider{}
-	if err := toml.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return nil, fmt.Errorf("webseed.http: host=%s, url=%s, %w", webSeedProviderUrl.Hostname(), webSeedProviderUrl.EscapedPath(), err)
+	fileNames := strings.Split(string(b), "\n")
+	for _, f := range fileNames {
+		response[f], err = url.JoinPath(baseUrl, f)
+		if err != nil {
+			return nil, err
+		}
 	}
 	d.logger.Debug("[snapshots.webseed] get from HTTP provider", "urls", len(response), "host", webSeedProviderUrl.Hostname(), "url", webSeedProviderUrl.EscapedPath())
 	return response, nil
@@ -151,7 +169,7 @@ func (d *WebSeeds) callS3Provider(ctx context.Context, token string) (snaptype.W
 	//v1:bucketName:accID:accessKeyID:accessKeySecret
 	l := strings.Split(token, ":")
 	if len(l) != 5 {
-		return nil, fmt.Errorf("token has invalid format, exepcing 'v1:tokenInBase64'")
+		return nil, fmt.Errorf("[snapshots] webseed token has invalid format. expeting 5 parts, found %d", len(l))
 	}
 	version, bucketName, accountId, accessKeyId, accessKeySecret := strings.TrimSpace(l[0]), strings.TrimSpace(l[1]), strings.TrimSpace(l[2]), strings.TrimSpace(l[3]), strings.TrimSpace(l[4])
 	if version != "v1" {
@@ -221,6 +239,7 @@ func (d *WebSeeds) downloadTorrentFilesFromProviders(ctx context.Context, rootDi
 	}
 	var addedNew int
 	e, ctx := errgroup.WithContext(ctx)
+	e.SetLimit(1024)
 	urlsByName := d.TorrentUrls()
 	//TODO:
 	// - what to do if node already synced?
@@ -230,7 +249,20 @@ func (d *WebSeeds) downloadTorrentFilesFromProviders(ctx context.Context, rootDi
 			continue
 		}
 		addedNew++
-		if !strings.HasSuffix(name, ".seg.torrent") {
+		whiteListed := strings.HasSuffix(name, ".seg.torrent") ||
+			strings.HasSuffix(name, ".kv.torrent") ||
+			strings.HasSuffix(name, ".v.torrent") ||
+			strings.HasSuffix(name, ".ef.torrent")
+		if !whiteListed {
+			_, fName := filepath.Split(name)
+			d.logger.Log(d.verbosity, "[snapshots] webseed has .torrent, but we skip it because this file-type not supported yet", "name", fName)
+			continue
+		}
+		//Erigon3 doesn't provide history of commitment (.v, .ef files), but does provide .kv:
+		// - prohibit v1-commitment...v, v2-commitment...ef, etc...
+		// - allow v1-commitment...kv
+		e3blackListed := strings.Contains(name, "commitment") && (strings.HasSuffix(name, ".v.torrent") || strings.HasSuffix(name, ".ef.torrent"))
+		if e3blackListed {
 			_, fName := filepath.Split(name)
 			d.logger.Log(d.verbosity, "[snapshots] webseed has .torrent, but we skip it because this file-type not supported yet", "name", fName)
 			continue
@@ -241,11 +273,11 @@ func (d *WebSeeds) downloadTorrentFilesFromProviders(ctx context.Context, rootDi
 			for _, url := range tUrls {
 				res, err := d.callTorrentHttpProvider(ctx, url, name)
 				if err != nil {
-					d.logger.Log(d.verbosity, "[snapshots] get .torrent file from webseed", "name", name, "err", err)
+					d.logger.Log(d.verbosity, "[snapshots] got from webseed", "name", name, "err", err)
 					continue
 				}
-				d.logger.Log(d.verbosity, "[snapshots] get .torrent file from webseed", "name", name)
-				if err := saveTorrent(tPath, res); err != nil {
+				d.logger.Log(d.verbosity, "[snapshots] got from webseed", "name", name)
+				if err := d.torrentFiles.Create(tPath, res); err != nil {
 					d.logger.Debug("[snapshots] saveTorrent", "err", err)
 					continue
 				}

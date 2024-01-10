@@ -17,22 +17,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/ledgerwatch/erigon/cl/phase1/core/state/lru"
 	"sync"
+
+	"github.com/ledgerwatch/erigon/cl/phase1/core/state/lru"
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/kv"
+	"github.com/ledgerwatch/erigon-lib/kv/kvcfg"
 	"github.com/ledgerwatch/erigon-lib/kv/membatchwithdb"
+	"github.com/ledgerwatch/erigon-lib/state"
+	"github.com/ledgerwatch/erigon/common/math"
 	"github.com/ledgerwatch/erigon/consensus"
+	"github.com/ledgerwatch/erigon/core/rawdb"
+	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/eth/stagedsync/stages"
 	"github.com/ledgerwatch/erigon/turbo/engineapi/engine_types"
 	"github.com/ledgerwatch/erigon/turbo/services"
-	"github.com/ledgerwatch/log/v3"
-
-	"github.com/ledgerwatch/erigon/common/math"
-	"github.com/ledgerwatch/erigon/core/rawdb"
-	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/turbo/shards"
+	"github.com/ledgerwatch/log/v3"
 )
 
 // the maximum point from the current head, past which side forks are not validated anymore.
@@ -56,6 +58,7 @@ type ForkValidator struct {
 	tmpDir        string
 	// block hashes that are deemed valid
 	validHashes *lru.Cache[libcommon.Hash, bool]
+	stateV3     bool
 
 	ctx context.Context
 
@@ -63,7 +66,7 @@ type ForkValidator struct {
 	lock sync.Mutex
 }
 
-func NewForkValidatorMock(currentHeight uint64) *ForkValidator {
+func NewForkValidatorMock(currentHeight uint64, stateV3 bool) *ForkValidator {
 	validHashes, err := lru.New[libcommon.Hash, bool]("validHashes", maxForkDepth*8)
 	if err != nil {
 		panic(err)
@@ -71,6 +74,7 @@ func NewForkValidatorMock(currentHeight uint64) *ForkValidator {
 	return &ForkValidator{
 		currentHeight: currentHeight,
 		validHashes:   validHashes,
+		stateV3:       stateV3,
 	}
 }
 
@@ -128,11 +132,15 @@ func (fv *ForkValidator) FlushExtendingFork(tx kv.RwTx, accumulator *shards.Accu
 	return nil
 }
 
+type HasDiff interface {
+	Diff() (*membatchwithdb.MemoryDiff, error)
+}
+
 // ValidatePayload returns whether a payload is valid or invalid, or if cannot be determined, it will be accepted.
 // if the payload extends the canonical chain, then we stack it in extendingFork without any unwind.
 // if the payload is a fork then we unwind to the point where the fork meets the canonical chain, and there we check whether it is valid.
 // if for any reason none of the actions above can be performed due to lack of information, we accept the payload and avoid validation.
-func (fv *ForkValidator) ValidatePayload(tx kv.Tx, header *types.Header, body *types.RawBody, extendCanonical bool) (status engine_types.EngineStatus, latestValidHash libcommon.Hash, validationError error, criticalError error) {
+func (fv *ForkValidator) ValidatePayload(tx kv.Tx, header *types.Header, body *types.RawBody, extendCanonical bool, logger log.Logger) (status engine_types.EngineStatus, latestValidHash libcommon.Hash, validationError error, criticalError error) {
 	fv.lock.Lock()
 	defer fv.lock.Unlock()
 	if fv.validatePayload == nil {
@@ -149,9 +157,20 @@ func (fv *ForkValidator) ValidatePayload(tx kv.Tx, header *types.Header, body *t
 
 	log.Debug("Execution ForkValidator.ValidatePayload", "extendCanonical", extendCanonical)
 	if extendCanonical {
-		extendingFork := membatchwithdb.NewMemoryBatch(tx, fv.tmpDir)
-		defer extendingFork.Close()
-
+		histV3, err := kvcfg.HistoryV3.Enabled(tx)
+		if err != nil {
+			return "", [32]byte{}, nil, err
+		}
+		var extendingFork kv.RwTx
+		if histV3 {
+			m := state.NewSharedDomains(tx, logger).WithMemBatch()
+			defer m.Close()
+			extendingFork = m
+		} else {
+			m := membatchwithdb.NewMemoryBatch(tx, fv.tmpDir, logger)
+			defer m.Close()
+			extendingFork = m
+		}
 		fv.extendingForkNotifications = &shards.Notifications{
 			Events:      shards.NewEvents(),
 			Accumulator: shards.NewAccumulator(),
@@ -164,9 +183,13 @@ func (fv *ForkValidator) ValidatePayload(tx kv.Tx, header *types.Header, body *t
 			return
 		}
 		if validationError == nil {
-			fv.memoryDiff, criticalError = extendingFork.Diff()
-			if criticalError != nil {
-				return
+			if casted, ok := extendingFork.(HasDiff); ok {
+				fv.memoryDiff, criticalError = casted.Diff()
+				if criticalError != nil {
+					return
+				}
+			} else {
+				panic(fmt.Sprintf("type %T doesn't have method Diff - like in MemoryMutation", casted))
 			}
 		}
 		return status, latestValidHash, validationError, criticalError
@@ -186,7 +209,7 @@ func (fv *ForkValidator) ValidatePayload(tx kv.Tx, header *types.Header, body *t
 		return
 	}
 
-	log.Debug("Execution ForkValidator.ValidatePayload", "foundCanonical", foundCanonical, "currentHash", currentHash, "unwindPoint", unwindPoint)
+	logger.Debug("Execution ForkValidator.ValidatePayload", "foundCanonical", foundCanonical, "currentHash", currentHash, "unwindPoint", unwindPoint)
 
 	var bodiesChain []*types.RawBody
 	var headersChain []*types.Header
@@ -222,14 +245,25 @@ func (fv *ForkValidator) ValidatePayload(tx kv.Tx, header *types.Header, body *t
 		if criticalError != nil {
 			return
 		}
-		log.Debug("Execution ForkValidator.ValidatePayload", "foundCanonical", foundCanonical, "currentHash", currentHash, "unwindPoint", unwindPoint)
+		logger.Debug("Execution ForkValidator.ValidatePayload", "foundCanonical", foundCanonical, "currentHash", currentHash, "unwindPoint", unwindPoint)
 	}
 	// Do not set an unwind point if we are already there.
 	if unwindPoint == fv.currentHeight {
 		unwindPoint = 0
 	}
-	batch := membatchwithdb.NewMemoryBatch(tx, fv.tmpDir)
-	defer batch.Rollback()
+	var batch kv.RwTx
+	histV3, err := kvcfg.HistoryV3.Enabled(tx)
+	if err != nil {
+		return "", [32]byte{}, nil, err
+	}
+	if histV3 {
+		sd := state.NewSharedDomains(tx, logger).WithMemBatch()
+		defer sd.Close()
+		batch = sd
+	} else {
+		batch = membatchwithdb.NewMemoryBatch(tx, fv.tmpDir, logger)
+		defer batch.Rollback()
+	}
 	notifications := &shards.Notifications{
 		Events:      shards.NewEvents(),
 		Accumulator: shards.NewAccumulator(),
@@ -268,7 +302,11 @@ func (fv *ForkValidator) validateAndStorePayload(tx kv.RwTx, header *types.Heade
 	latestValidHash = header.Hash()
 	if validationError != nil {
 		var latestValidNumber uint64
-		latestValidNumber, criticalError = stages.GetStageProgress(tx, stages.IntermediateHashes)
+		if fv.stateV3 {
+			latestValidNumber, criticalError = stages.GetStageProgress(tx, stages.Execution)
+		} else {
+			latestValidNumber, criticalError = stages.GetStageProgress(tx, stages.IntermediateHashes)
+		}
 		if criticalError != nil {
 			return
 		}

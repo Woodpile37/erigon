@@ -7,13 +7,14 @@ import (
 	"time"
 
 	"github.com/holiman/uint256"
+	"github.com/stretchr/testify/require"
+
 	"github.com/ledgerwatch/erigon-lib/chain"
 	"github.com/ledgerwatch/erigon-lib/common/datadir"
 	"github.com/ledgerwatch/erigon-lib/direct"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces"
 	proto_sentry "github.com/ledgerwatch/erigon-lib/gointerfaces/sentry"
 	"github.com/ledgerwatch/erigon-lib/kv"
-	"github.com/stretchr/testify/require"
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon/core"
@@ -22,6 +23,7 @@ import (
 	"github.com/ledgerwatch/erigon/core/state/temporal"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/p2p"
+	"github.com/ledgerwatch/log/v3"
 )
 
 func testSentryServer(db kv.Getter, genesis *types.Genesis, genesisHash libcommon.Hash) *GrpcServer {
@@ -88,8 +90,8 @@ func testForkIDSplit(t *testing.T, protocol uint) {
 		gspecNoFork  = &types.Genesis{Config: configNoFork}
 		gspecProFork = &types.Genesis{Config: configProFork}
 
-		genesisNoFork  = core.MustCommitGenesis(gspecNoFork, dbNoFork, "")
-		genesisProFork = core.MustCommitGenesis(gspecProFork, dbProFork, "")
+		genesisNoFork  = core.MustCommitGenesis(gspecNoFork, dbNoFork, "", log.Root())
+		genesisProFork = core.MustCommitGenesis(gspecProFork, dbProFork, "", log.Root())
 	)
 
 	var s1, s2 *GrpcServer
@@ -177,7 +179,7 @@ func TestSentryServerImpl_SetStatusInitPanic(t *testing.T) {
 	configNoFork := &chain.Config{HomesteadBlock: big.NewInt(1), ChainID: big.NewInt(1)}
 	_, dbNoFork, _ := temporal.NewTestDB(t, datadir.New(t.TempDir()), nil)
 	gspecNoFork := &types.Genesis{Config: configNoFork}
-	genesisNoFork := core.MustCommitGenesis(gspecNoFork, dbNoFork, "")
+	genesisNoFork := core.MustCommitGenesis(gspecNoFork, dbNoFork, "", log.Root())
 	ss := &GrpcServer{p2p: &p2p.Config{}}
 
 	_, err := ss.SetStatus(context.Background(), &proto_sentry.StatusData{

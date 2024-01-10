@@ -19,6 +19,7 @@ import (
 	"math"
 	"math/big"
 	"os"
+	"path"
 	"time"
 
 	"github.com/ledgerwatch/erigon-lib/chain/networkname"
@@ -50,6 +51,11 @@ const (
 	MaxChunkSize   uint64        = 1 << 20 // 1 MiB
 	ReqTimeout     time.Duration = 10 * time.Second
 	RespTimeout    time.Duration = 15 * time.Second
+)
+
+const (
+	SubDivisionFolderSize = 10_000
+	SlotsPerDump          = 1024
 )
 
 var (
@@ -489,6 +495,24 @@ type BeaconChainConfig struct {
 	MaxBuilderEpochMissedSlots       uint64 // MaxBuilderEpochMissedSlots is defines the number of total skip slot (per epoch rolling windows) to fallback from using relay/builder to local execution engine for block construction.
 }
 
+func (b *BeaconChainConfig) RoundSlotToEpoch(slot uint64) uint64 {
+	return slot - (slot % b.SlotsPerEpoch)
+}
+
+func (b *BeaconChainConfig) RoundSlotToSyncCommitteePeriod(slot uint64) uint64 {
+	slotsPerSyncCommitteePeriod := b.SlotsPerEpoch * b.EpochsPerSyncCommitteePeriod
+	return slot - (slot % slotsPerSyncCommitteePeriod)
+}
+
+func (b *BeaconChainConfig) SyncCommitteePeriod(slot uint64) uint64 {
+	return slot / (b.SlotsPerEpoch * b.EpochsPerSyncCommitteePeriod)
+}
+
+func (b *BeaconChainConfig) RoundSlotToVotePeriod(slot uint64) uint64 {
+	p := b.SlotsPerEpoch * b.EpochsPerEth1VotingPeriod
+	return slot - (slot % p)
+}
+
 func (b *BeaconChainConfig) GetCurrentStateVersion(epoch uint64) StateVersion {
 	forkEpochList := []uint64{b.AltairForkEpoch, b.BellatrixForkEpoch, b.CapellaForkEpoch, b.DenebForkEpoch}
 	stateVersion := Phase0Version
@@ -800,7 +824,8 @@ func goerliConfig() BeaconChainConfig {
 	cfg.BellatrixForkVersion = 0x02001020
 	cfg.CapellaForkEpoch = 162304
 	cfg.CapellaForkVersion = 0x03001020
-	cfg.DenebForkVersion = 0x40001020
+	cfg.DenebForkEpoch = 231680
+	cfg.DenebForkVersion = 0x04001020
 	cfg.TerminalTotalDifficulty = "10790000"
 	cfg.DepositContractAddress = "0xff50ed3d0ec03aC01D4C79aAd74928BFF48a7b2b"
 	cfg.InitializeForkSchedule()
@@ -946,6 +971,22 @@ func (b *BeaconChainConfig) GetForkVersionByVersion(v StateVersion) uint32 {
 	panic("invalid version")
 }
 
+func (b *BeaconChainConfig) GetForkEpochByVersion(v StateVersion) uint64 {
+	switch v {
+	case Phase0Version:
+		return 0
+	case AltairVersion:
+		return b.AltairForkEpoch
+	case BellatrixVersion:
+		return b.BellatrixForkEpoch
+	case CapellaVersion:
+		return b.CapellaForkEpoch
+	case DenebVersion:
+		return b.DenebForkEpoch
+	}
+	panic("invalid version")
+}
+
 func GetConfigsByNetwork(net NetworkType) (*GenesisConfig, *NetworkConfig, *BeaconChainConfig) {
 	networkConfig := NetworkConfigs[net]
 	genesisConfig := GenesisConfigs[net]
@@ -1012,4 +1053,9 @@ func EmbeddedEnabledByDefault(id uint64) bool {
 
 func SupportBackfilling(networkId uint64) bool {
 	return networkId == uint64(MainnetNetwork) || networkId == uint64(SepoliaNetwork)
+}
+
+func EpochToPaths(slot uint64, config *BeaconChainConfig, suffix string) (string, string) {
+	folderPath := path.Clean(fmt.Sprintf("%d", slot/SubDivisionFolderSize))
+	return folderPath, path.Clean(fmt.Sprintf("%s/%d.%s.sz", folderPath, slot, suffix))
 }

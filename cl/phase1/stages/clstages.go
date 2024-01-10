@@ -98,7 +98,6 @@ func ClStagesCfg(
 type StageName = string
 
 const (
-	WaitForPeers             StageName = "WaitForPeers"
 	CatchUpEpochs            StageName = "CatchUpEpochs"
 	CatchUpBlocks            StageName = "CatchUpBlocks"
 	ForkChoice               StageName = "ForkChoice"
@@ -113,9 +112,6 @@ const (
 )
 
 func MetaCatchingUp(args Args) StageName {
-	if args.peers < minPeersForDownload {
-		return WaitForPeers
-	}
 	if !args.hasDownloaded {
 		return DownloadHistoricalBlocks
 	}
@@ -218,39 +214,6 @@ func ConsensusClStages(ctx context.Context,
 			return
 		},
 		Stages: map[string]clstages.Stage[*Cfg, Args]{
-			WaitForPeers: {
-				Description: `wait for enough peers. This is also a safe stage to go to when unsure of what stage to use`,
-				TransitionFunc: func(cfg *Cfg, args Args, err error) string {
-					if x := MetaCatchingUp(args); x != "" {
-						return x
-					}
-					return CatchUpBlocks
-				},
-				ActionFunc: func(ctx context.Context, logger log.Logger, cfg *Cfg, args Args) error {
-					peersCount, err := cfg.rpc.Peers()
-					if err != nil {
-						return nil
-					}
-					waitWhenNotEnoughPeers := 3 * time.Second
-					for {
-						if peersCount >= minPeersForDownload {
-							break
-						}
-						select {
-						case <-ctx.Done():
-							return ctx.Err()
-						default:
-						}
-						logger.Info("[Caplin] Waiting For Peers", "have", peersCount, "needed", minPeersForDownload, "retryIn", waitWhenNotEnoughPeers)
-						time.Sleep(waitWhenNotEnoughPeers)
-						peersCount, err = cfg.rpc.Peers()
-						if err != nil {
-							peersCount = 0
-						}
-					}
-					return nil
-				},
-			},
 			DownloadHistoricalBlocks: {
 				Description: "Download historical blocks",
 				TransitionFunc: func(cfg *Cfg, args Args, err error) string {
@@ -269,7 +232,7 @@ func ConsensusClStages(ctx context.Context,
 					startingSlot := cfg.state.LatestBlockHeader().Slot
 					downloader := network2.NewBackwardBeaconDownloader(context.Background(), cfg.rpc, cfg.indiciesDB)
 
-					if err := SpawnStageHistoryDownload(StageHistoryReconstruction(downloader, cfg.antiquary, cfg.sn, cfg.beaconDB, cfg.indiciesDB, cfg.executionClient, cfg.genesisCfg, cfg.beaconCfg, cfg.backfilling, false, startingRoot, startingSlot, cfg.tmpdir, logger), context.Background(), logger); err != nil {
+					if err := SpawnStageHistoryDownload(StageHistoryReconstruction(downloader, cfg.antiquary, cfg.sn, cfg.beaconDB, cfg.indiciesDB, cfg.executionClient, cfg.genesisCfg, cfg.beaconCfg, cfg.backfilling, false, startingRoot, startingSlot, cfg.tmpdir, 600*time.Millisecond, logger), context.Background(), logger); err != nil {
 						cfg.hasDownloaded = false
 						return err
 					}
@@ -321,7 +284,8 @@ func ConsensusClStages(ctx context.Context,
 									currentEpoch = utils.Max64(args.seenEpoch, currentEpoch-1)
 									continue MainLoop
 								}
-								header, err := executionPayload.RlpHeader()
+								parentRoot := &block.Block.ParentRoot
+								header, err := executionPayload.RlpHeader(parentRoot)
 								if err != nil {
 									log.Warn("bad blocks segment received", "err", err)
 									cfg.rpc.BanPeer(blocks.Peer)
@@ -368,7 +332,7 @@ func ConsensusClStages(ctx context.Context,
 					)
 					respCh := make(chan *peers.PeeredObject[[]*cltypes.SignedBeaconBlock])
 					errCh := make(chan error)
-					sources := []persistence.BlockSource{gossipSource}
+					sources := []persistence.BlockSource{gossipSource, rpcSource}
 
 					// if we are more than one block behind, we request the rpc source as well
 					if totalRequest > 2 {
@@ -378,36 +342,74 @@ func ConsensusClStages(ctx context.Context,
 					ctx, cn := context.WithTimeout(ctx, 15*time.Second)
 					defer cn()
 
-					tx, err := cfg.indiciesDB.BeginRw(ctx)
-					if err != nil {
-						return err
-					}
-					defer tx.Rollback()
 					// we go ask all the sources and see who gets back to us first. whoever does is the winner!!
 					for _, v := range sources {
 						sourceFunc := v.GetRange
-						go func() {
-							blocks, err := sourceFunc(ctx, tx, args.seenSlot+1, totalRequest)
+						go func(source persistence.BlockSource) {
+							if _, ok := source.(*persistence.BeaconRpcSource); ok {
+								time.Sleep(2 * time.Second)
+								var blocks *peers.PeeredObject[[]*cltypes.SignedBeaconBlock]
+							Loop:
+								for {
+									var err error
+									from := args.seenSlot - 2
+									currentSlot := utils.GetCurrentSlot(cfg.genesisCfg.GenesisTime, cfg.beaconCfg.SecondsPerSlot)
+									count := (currentSlot - from) + 2
+									if currentSlot <= cfg.forkChoice.HighestSeen() {
+										time.Sleep(100 * time.Millisecond)
+										continue
+									}
+									blocks, err = sourceFunc(ctx, nil, from, count)
+									if err != nil {
+										errCh <- err
+										return
+									}
+									for _, block := range blocks.Data {
+										if block.Block.Slot >= currentSlot {
+											break Loop
+										}
+									}
+								}
+								respCh <- blocks
+								return
+							}
+							blocks, err := sourceFunc(ctx, nil, args.seenSlot+1, totalRequest)
 							if err != nil {
 								errCh <- err
 								return
 							}
 							respCh <- blocks
-						}()
+						}(v)
 					}
+					tx, err := cfg.indiciesDB.BeginRw(ctx)
+					if err != nil {
+						return err
+					}
+					defer tx.Rollback()
+
 					logTimer := time.NewTicker(30 * time.Second)
 					defer logTimer.Stop()
-					select {
-					case err := <-errCh:
-						return err
-					case blocks := <-respCh:
-						for _, block := range blocks.Data {
-							if err := processBlock(tx, block, true, true); err != nil {
-								return err
+				MainLoop:
+					for {
+						select {
+						case <-ctx.Done():
+							return errors.New("timeout waiting for blocks")
+						case err := <-errCh:
+							return err
+						case blocks := <-respCh:
+							for _, block := range blocks.Data {
+								if err := processBlock(tx, block, true, true); err != nil {
+									log.Error("bad blocks segment received", "err", err)
+									cfg.rpc.BanPeer(blocks.Peer)
+									continue MainLoop
+								}
+								if block.Block.Slot >= args.targetSlot {
+									break MainLoop
+								}
 							}
+						case <-logTimer.C:
+							logger.Info("[Caplin] Progress", "progress", cfg.forkChoice.HighestSeen(), "from", args.seenSlot, "to", args.targetSlot)
 						}
-					case <-logTimer.C:
-						logger.Info("[Caplin] Progress", "progress", cfg.forkChoice.HighestSeen(), "from", args.seenEpoch, "to", args.targetSlot)
 					}
 					return tx.Commit()
 				},
@@ -458,9 +460,10 @@ func ConsensusClStages(ctx context.Context,
 						return err
 					}
 					defer tx.Rollback()
-					// Fix canonical chain in the indexed datatabase.
-					if err := beacon_indicies.TruncateCanonicalChain(ctx, tx, headSlot); err != nil {
-						return err
+
+					type canonicalEntry struct {
+						slot uint64
+						root common.Hash
 					}
 
 					currentRoot := headRoot
@@ -469,12 +472,11 @@ func ConsensusClStages(ctx context.Context,
 					if err != nil {
 						return err
 					}
+					reconnectionRoots := make([]canonicalEntry, 0, 1)
 
 					for currentRoot != currentCanonical {
 						var newFoundSlot *uint64
-						if err := beacon_indicies.MarkRootCanonical(ctx, tx, currentSlot, currentRoot); err != nil {
-							return err
-						}
+
 						if currentRoot, err = beacon_indicies.ReadParentBlockRoot(ctx, tx, currentRoot); err != nil {
 							return err
 						}
@@ -489,10 +491,22 @@ func ConsensusClStages(ctx context.Context,
 						if err != nil {
 							return err
 						}
+						reconnectionRoots = append(reconnectionRoots, canonicalEntry{currentSlot, currentRoot})
+					}
+					if err := beacon_indicies.TruncateCanonicalChain(ctx, tx, currentSlot); err != nil {
+						return err
+					}
+					for i := len(reconnectionRoots) - 1; i >= 0; i-- {
+						if err := beacon_indicies.MarkRootCanonical(ctx, tx, reconnectionRoots[i].slot, reconnectionRoots[i].root); err != nil {
+							return err
+						}
+					}
+					if err := beacon_indicies.MarkRootCanonical(ctx, tx, headSlot, headRoot); err != nil {
+						return err
 					}
 
 					// Increment validator set
-					headState, err := cfg.forkChoice.GetFullState(headRoot, false)
+					headState, err := cfg.forkChoice.GetStateAtBlockRoot(headRoot, false)
 					if err != nil {
 						return err
 					}
@@ -500,8 +514,17 @@ func ConsensusClStages(ctx context.Context,
 						return err
 					}
 					start := time.Now()
+					// Incement some stuff here
 					preverifiedValidators := cfg.forkChoice.PreverifiedValidator(headState.FinalizedCheckpoint().BlockRoot())
+					preverifiedHistoricalSummary := cfg.forkChoice.PreverifiedHistoricalSummaries(headState.FinalizedCheckpoint().BlockRoot())
+					preverifiedHistoricalRoots := cfg.forkChoice.PreverifiedHistoricalRoots(headState.FinalizedCheckpoint().BlockRoot())
 					if err := state_accessors.IncrementPublicKeyTable(tx, headState, preverifiedValidators); err != nil {
+						return err
+					}
+					if err := state_accessors.IncrementHistoricalSummariesTable(tx, headState, preverifiedHistoricalSummary); err != nil {
+						return err
+					}
+					if err := state_accessors.IncrementHistoricalRootsTable(tx, headState, preverifiedHistoricalRoots); err != nil {
 						return err
 					}
 					log.Debug("Incremented state history", "elapsed", time.Since(start), "preverifiedValidators", preverifiedValidators)
@@ -598,7 +621,10 @@ func ConsensusClStages(ctx context.Context,
 			SleepForSlot: {
 				Description: `sleep until the next slot`,
 				TransitionFunc: func(cfg *Cfg, args Args, err error) string {
-					return WaitForPeers
+					if x := MetaCatchingUp(args); x != "" {
+						return x
+					}
+					return ListenForForks
 				},
 				ActionFunc: func(ctx context.Context, logger log.Logger, cfg *Cfg, args Args) error {
 					nextSlot := args.seenSlot + 1

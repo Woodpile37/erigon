@@ -186,7 +186,7 @@ func (api *APIImpl) EstimateGas(ctx context.Context, argsOrNil *ethapi2.CallArgs
 		if err != nil {
 			return 0, err
 		}
-		stateReader := state.NewCachedReader2(cacheView, dbtx)
+		stateReader := rpchelper.CreateLatestCachedStateReader(cacheView, dbtx, api.historyV3(dbtx))
 		state := state.New(stateReader)
 		if state == nil {
 			return 0, fmt.Errorf("can't get the current state")
@@ -355,7 +355,7 @@ func (api *APIImpl) GetProof(ctx context.Context, address libcommon.Address, sto
 		if latestBlock-blockNr > uint64(api.MaxGetProofRewindBlockCount) {
 			return nil, fmt.Errorf("requested block is too old, block must be within %d blocks of the head block number (currently %d)", uint64(api.MaxGetProofRewindBlockCount), latestBlock)
 		}
-		batch := membatchwithdb.NewMemoryBatch(tx, api.dirs.Tmp)
+		batch := membatchwithdb.NewMemoryBatch(tx, api.dirs.Tmp, api.logger)
 		defer batch.Rollback()
 
 		unwindState := &stagedsync.UnwindState{UnwindPoint: blockNr}
@@ -455,15 +455,16 @@ func (api *APIImpl) CreateAccessList(ctx context.Context, args ethapi2.CallArgs,
 	if block == nil {
 		return nil, nil
 	}
+	histV3 := api.historyV3(tx)
 	var stateReader state.StateReader
 	if latest {
 		cacheView, err := api.stateCache.View(ctx, tx)
 		if err != nil {
 			return nil, err
 		}
-		stateReader = state.NewCachedReader2(cacheView, tx)
+		stateReader = rpchelper.CreateLatestCachedStateReader(cacheView, tx, histV3)
 	} else {
-		stateReader, err = rpchelper.CreateHistoryStateReader(tx, blockNumber+1, 0, api.historyV3(tx), chainConfig.ChainName)
+		stateReader, err = rpchelper.CreateHistoryStateReader(tx, blockNumber+1, 0, histV3, chainConfig.ChainName)
 		if err != nil {
 			return nil, err
 		}
@@ -489,7 +490,14 @@ func (api *APIImpl) CreateAccessList(ctx context.Context, args ethapi2.CallArgs,
 			}
 			if reply.Found {
 				nonce = reply.Nonce + 1
+			} else {
+				a, err := stateReader.ReadAccountData(*args.From)
+				if err != nil {
+					return nil, err
+				}
+				nonce = a.Nonce + 1
 			}
+
 			args.Nonce = (*hexutil.Uint64)(&nonce)
 		}
 		to = crypto.CreateAddress(*args.From, uint64(*args.Nonce))
